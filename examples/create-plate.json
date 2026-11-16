@@ -1,0 +1,20 @@
+{
+  "request_id": "create_plate",
+  "document_id": "mounting_plate",
+  "expected_revision": 0,
+  "actor": "cad_agent",
+  "commands": [
+    {
+      "op": "sketch.create_rectangle",
+      "feature_id": "plate_profile",
+      "width": 80,
+      "height": 40
+    },
+    {
+      "op": "feature.extrude",
+      "feature_id": "plate_body",
+      "profile_id": "plate_profile",
+      "depth": 6
+    }
+  ]
+}

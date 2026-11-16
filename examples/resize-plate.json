@@ -1,0 +1,14 @@
+{
+  "request_id": "resize_plate",
+  "document_id": "mounting_plate",
+  "expected_revision": 1,
+  "actor": "cad_agent",
+  "commands": [
+    {
+      "op": "feature.set_parameter",
+      "feature_id": "plate_profile",
+      "parameter": "width",
+      "value": 100
+    }
+  ]
+}

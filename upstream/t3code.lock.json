@@ -1,0 +1,11 @@
+{
+  "repository": "https://github.com/pingdotgg/t3code.git",
+  "tag": "v0.1.9",
+  "commit": "24e77473ecf41bc1f7142529c7911c1c1aae1d76",
+  "checkout": ".work/upstream/t3code",
+  "root_license": "MIT",
+  "root_license_sha256": "935d8f2af0c703f9c39517ee57cc4930b19d02d533be930b63f0e82f93614b43",
+  "audit_date": "2026-11-15",
+  "selection_reason": "Matches the version in the locally installed desktop AppImage filename; not a claim about the latest release.",
+  "integration_status": "reference_checkout_only"
+}

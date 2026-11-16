@@ -1,0 +1,16 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "t3cad"
+version = "0.1.0"
+description = "An experimental, agent-first CAD document and command harness"
+requires-python = ">=3.11"
+dependencies = []
+
+[project.scripts]
+t3cad = "t3cad.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["t3cad*"]
