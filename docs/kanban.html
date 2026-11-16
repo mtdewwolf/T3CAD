@@ -469,9 +469,9 @@
     <div class="column" id="col-wip" data-col="wip">
       <div class="col-header">
         <span class="col-title" style="color:var(--warning, #f59e0b);">
-          <span>⚙</span> In Progress (Hardening)
+          <span>⚙</span> In Progress (Hardening & Kernel Dev)
         </span>
-        <span class="col-pill" id="count-wip">3</span>
+        <span class="col-pill" id="count-wip">5</span>
       </div>
       <div class="col-cards" id="cards-wip">
         <div class="card" draggable="true" data-id="CAD-201" data-cat="kernel">
@@ -514,10 +514,42 @@
           <div class="card-title">Topological Naming Stability Map</div>
           <div class="card-desc">Persistent face/edge identifiers to preserve downstream operations across sketch edits.</div>
           <div class="card-meta-row">
-            <span>Drafting Spec</span>
+            <span style="color:var(--primary, #3b82f6);">In Active Dev</span>
             <div class="card-actions">
               <button class="btn-move" title="Move left" onclick="moveCard('CAD-203', -1)">←</button>
               <button class="btn-move" title="Move right" onclick="moveCard('CAD-203', 1)">→</button>
+            </div>
+          </div>
+        </div>
+
+        <div class="card" draggable="true" data-id="CAD-402" data-cat="kernel">
+          <div class="card-top">
+            <span class="tag tag-kernel">Kernel</span>
+            <span class="card-id">CAD-402</span>
+          </div>
+          <div class="card-title">STEP-NC 5-Axis Toolpath Simulation</div>
+          <div class="card-desc">Subtractive G-code simulation & waterline roughing/finishing toolpath synthesis.</div>
+          <div class="card-meta-row">
+            <span style="color:var(--primary, #3b82f6);">In Active Dev</span>
+            <div class="card-actions">
+              <button class="btn-move" title="Move left" onclick="moveCard('CAD-402', -1)">←</button>
+              <button class="btn-move" title="Move right" onclick="moveCard('CAD-402', 1)">→</button>
+            </div>
+          </div>
+        </div>
+
+        <div class="card" draggable="true" data-id="CAD-403" data-cat="kernel">
+          <div class="card-top">
+            <span class="tag tag-kernel">Kernel</span>
+            <span class="card-id">CAD-403</span>
+          </div>
+          <div class="card-title">Generative Parametric AI Agent Loop</div>
+          <div class="card-desc">Mass properties, thin-wall diagnostics & generative optimization solver.</div>
+          <div class="card-meta-row">
+            <span style="color:var(--primary, #3b82f6);">In Active Dev</span>
+            <div class="card-actions">
+              <button class="btn-move" title="Move left" onclick="moveCard('CAD-403', -1)">←</button>
+              <button class="btn-move" title="Move right" onclick="moveCard('CAD-403', 1)">→</button>
             </div>
           </div>
         </div>
@@ -589,7 +621,7 @@
         <span class="col-title" style="color:var(--muted-foreground, #94a3b8);">
           <span>📋</span> Post-v0.1 Backlog
         </span>
-        <span class="col-pill" id="count-backlog">3</span>
+        <span class="col-pill" id="count-backlog">1</span>
       </div>
       <div class="col-cards" id="cards-backlog">
         <div class="card" draggable="true" data-id="CAD-401" data-cat="interop">
@@ -603,36 +635,6 @@
             <span>v0.2 Scope</span>
             <div class="card-actions">
               <button class="btn-move" title="Move left" onclick="moveCard('CAD-401', -1)">←</button>
-            </div>
-          </div>
-        </div>
-
-        <div class="card" draggable="true" data-id="CAD-402" data-cat="kernel">
-          <div class="card-top">
-            <span class="tag tag-kernel">Kernel</span>
-            <span class="card-id">CAD-402</span>
-          </div>
-          <div class="card-title">STEP-NC 5-Axis Toolpath Simulation</div>
-          <div class="card-desc">Subtractive G-code simulation directly from parametric model solid geometry.</div>
-          <div class="card-meta-row">
-            <span>Research</span>
-            <div class="card-actions">
-              <button class="btn-move" title="Move left" onclick="moveCard('CAD-402', -1)">←</button>
-            </div>
-          </div>
-        </div>
-
-        <div class="card" draggable="true" data-id="CAD-403" data-cat="kernel">
-          <div class="card-top">
-            <span class="tag tag-kernel">Kernel</span>
-            <span class="card-id">CAD-403</span>
-          </div>
-          <div class="card-title">Generative Parametric AI Agent Loop</div>
-          <div class="card-desc">Iterative multi-turn design synthesis solving target stress and volume envelopes.</div>
-          <div class="card-meta-row">
-            <span>AI Studio</span>
-            <div class="card-actions">
-              <button class="btn-move" title="Move left" onclick="moveCard('CAD-403', -1)">←</button>
             </div>
           </div>
         </div>
