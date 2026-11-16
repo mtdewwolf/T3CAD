@@ -1,0 +1,2797 @@
+From 66db3c9a100418c990bf193f21ff73b3400bf880 Mon Sep 17 00:00:00 2001
+From: T3CAD <t3cad@local>
+Date: Sun, 15 Nov 2026 18:57:43 -0700
+Subject: [PATCH 2/2] feat(cad): add axisymmetric revolves, polygon vertex
+ editing, 2D blueprint, and OBJ export
+
+---
+ .../server/src/cad/CadDocumentService.test.ts | 115 ++++
+ apps/server/src/cad/CadDocumentService.ts     | 464 ++++++++++++++--
+ apps/server/src/cad/CadKernel.test.ts         | 106 +++-
+ apps/server/src/cad/CadKernel.ts              | 301 ++++++++--
+ .../src/mcp/toolkits/cad/CadToolkit.test.ts   |  33 +-
+ apps/server/src/mcp/toolkits/cad/handlers.ts  |  23 +
+ apps/server/src/mcp/toolkits/cad/tools.ts     |  33 +-
+ .../src/observability/RpcInstrumentation.ts   |   1 +
+ .../src/provider/agentContextBudget.json      |   2 +-
+ apps/server/src/ws.ts                         |   1 +
+ .../src/components/cad/CadSketchBlueprint.tsx | 242 ++++++++
+ .../src/components/cad/CadWorkspacePanel.tsx  | 520 +++++++++++++++---
+ apps/web/src/state/cad.ts                     |   6 +
+ packages/contracts/src/cad.ts                 |  70 ++-
+ .../contracts/src/clientRpcPermissions.ts     |   1 +
+ packages/contracts/src/rpc.ts                 |  10 +
+ 16 files changed, 1738 insertions(+), 190 deletions(-)
+ create mode 100644 apps/web/src/components/cad/CadSketchBlueprint.tsx
+
+diff --git a/apps/server/src/cad/CadDocumentService.test.ts b/apps/server/src/cad/CadDocumentService.test.ts
+index bad5f01b..3dc0b36c 100644
+--- a/apps/server/src/cad/CadDocumentService.test.ts
++++ b/apps/server/src/cad/CadDocumentService.test.ts
+@@ -398,3 +398,118 @@ it.effect(
+       }),
+     ).pipe(Effect.provide(NodeServices.layer)),
+ );
++
++it.effect(
++  "supports stepped_flange revolve preset, polygon vertex editing, revolve guards, and OBJ export",
++  () =>
++    Effect.scoped(
++      Effect.gen(function* () {
++        const fs = yield* FileSystem.FileSystem;
++        const path = yield* Path.Path;
++        const workspaceRoot = yield* fs.makeTempDirectoryScoped({ prefix: "t3cad-wave2-" });
++        const serviceLayer = makeTestLayer(workspaceRoot);
++
++        yield* Effect.gen(function* () {
++          const cad = yield* CadDocumentService.CadDocumentService;
++          const docId = CadDocumentId.make("turned_flange");
++
++          const created = yield* cad.createDocument({
++            projectId: PROJECT_ID,
++            documentId: docId,
++            name: "Turned Stepped Flange",
++            preset: "stepped_flange",
++          });
++
++          assert.equal(created.revision, 1);
++          assert.equal(created.features.length, 10);
++          assert.equal(created.report.status, "valid");
++          assert.equal(created.report.watertight, true);
++          assert.deepEqual(created.report.boundsMm, {
++            min: [-42, -42, 0],
++            max: [42, 42, 28],
++          });
++          assert.isTrue(created.report.totalVolumeMm3 > 67_500);
++          assert.isTrue(created.report.totalVolumeMm3 < 69_000);
++
++          // Reject polygon point update that would cross dependent revolve's rotation axis.
++          const axisCrossExit = yield* Effect.exit(
++            cad.applyCommands({
++              projectId: PROJECT_ID,
++              documentId: docId,
++              requestId: CadRequestId.make("req-poly-cross"),
++              expectedRevision: NonNegativeInt.make(1),
++              actor: { kind: "user", id: "designer" },
++              commands: [
++                {
++                  op: "sketch.set_polygon_points",
++                  featureId: CadFeatureId.make("flange_profile"),
++                  points: [
++                    [-5, 0],
++                    [42, 0],
++                    [42, 10],
++                    [12, 10],
++                  ],
++                },
++              ],
++            }),
++          );
++          assert.equal(axisCrossExit._tag, "Failure");
++
++          // Valid polygon expansion + partial 180° revolve edit.
++          const updated = yield* cad.applyCommands({
++            projectId: PROJECT_ID,
++            documentId: docId,
++            requestId: CadRequestId.make("req-flange-edit"),
++            expectedRevision: NonNegativeInt.make(1),
++            actor: { kind: "agent", id: "cad-agent", label: "T3CAD Agent" },
++            commands: [
++              {
++                op: "sketch.set_polygon_points",
++                featureId: CadFeatureId.make("flange_profile"),
++                points: [
++                  [12, 0],
++                  [48, 0],
++                  [48, 10],
++                  [22, 10],
++                  [22, 28],
++                  [12, 28],
++                ],
++              },
++              {
++                op: "feature.set_parameter",
++                featureId: CadFeatureId.make("flange_body"),
++                parameter: "angleDeg",
++                value: 180,
++              },
++            ],
++          });
++          assert.equal(updated.revision, 2);
++          assert.equal(updated.snapshot.report.watertight, true);
++          assert.deepEqual(updated.snapshot.report.boundsMm, {
++            min: [-48, 0, 0],
++            max: [48, 48, 28],
++          });
++
++          const obj = yield* cad.exportObj({
++            projectId: PROJECT_ID,
++            documentId: docId,
++            relativePath: "exports/turned_flange.obj",
++          });
++          assert.equal(obj.writtenPath, "exports/turned_flange.obj");
++          assert.isTrue(obj.vertexCount > 300);
++          assert.isTrue(obj.triangleCount > 100);
++          assert.isTrue(obj.objText.includes("o flange_body\n"));
++          assert.isTrue(yield* fs.exists(path.join(workspaceRoot, "exports/turned_flange.obj")));
++
++          const escapeObj = yield* Effect.exit(
++            cad.exportObj({
++              projectId: PROJECT_ID,
++              documentId: docId,
++              relativePath: "../escape.obj",
++            }),
++          );
++          assert.equal(escapeObj._tag, "Failure");
++        }).pipe(Effect.provide(serviceLayer));
++      }),
++    ).pipe(Effect.provide(NodeServices.layer)),
++);
+diff --git a/apps/server/src/cad/CadDocumentService.ts b/apps/server/src/cad/CadDocumentService.ts
+index 7ecbc775..57b659db 100644
+--- a/apps/server/src/cad/CadDocumentService.ts
++++ b/apps/server/src/cad/CadDocumentService.ts
+@@ -17,6 +17,8 @@ import {
+   CadDocumentSnapshot,
+   type CadDocumentSummary,
+   type CadDomainError,
++  type CadExportObjInput,
++  type CadExportObjResult,
+   type CadExportStlInput,
+   type CadExportStlResult,
+   CadFeature,
+@@ -54,7 +56,13 @@ import * as Stream from "effect/Stream";
+ 
+ import * as ProjectService from "../project/ProjectService.ts";
+ import * as WorkspacePaths from "../workspace/WorkspacePaths.ts";
+-import { evaluateCadFeatures, generateAsciiStl, isSimplePolygon } from "./CadKernel.ts";
++import {
++  evaluateCadFeatures,
++  generateAsciiStl,
++  generateWavefrontObj,
++  isSimplePolygon,
++  revolveProfileCrossesAxis,
++} from "./CadKernel.ts";
+ 
+ const CAD_DIR_NAME = ".t3cad";
+ const CAD_FILE_EXTENSION = ".t3cad.json";
+@@ -72,21 +80,25 @@ export const CAD_CAPABILITIES: CadCapabilities = {
+     "sketch.create_rectangle",
+     "sketch.create_circle",
+     "sketch.create_polygon",
++    "sketch.set_polygon_points",
+     "feature.extrude",
++    "feature.revolve",
+     "feature.set_parameter",
+     "feature.rename",
+     "feature.delete",
+   ],
+-  featureKinds: ["rectangle", "circle", "polygon", "extrusion"],
++  featureKinds: ["rectangle", "circle", "polygon", "extrusion", "revolve"],
+   sketchPlanes: ["xy", "xz", "yz"],
+   extrusionOperations: ["new_body", "union", "cut", "intersect"],
+-  presets: ["blank", "mounting_plate", "l_bracket"],
++  revolveAxes: ["u", "v"],
++  presets: ["blank", "mounting_plate", "l_bracket", "stepped_flange"],
+   atomicBatches: true,
+   optimisticConcurrency: true,
+   persistedIdempotency: true,
+   revisionRestore: true,
+   solidModeling: true,
+   stlExport: true,
++  objExport: true,
+ };
+ 
+ interface IdempotencyRecord {
+@@ -172,6 +184,21 @@ const isPositiveDimension = (value: number): boolean =>
+ const isValidCoordinate = (value: number): boolean =>
+   Number.isFinite(value) && value >= -CAD_MAX_DIMENSION_MM && value <= CAD_MAX_DIMENSION_MM;
+ 
++const validateDependentRevolves = (features: ReadonlyArray<CadFeature>): CadFeatureError | null => {
++  for (const feature of features) {
++    if (feature.kind !== "revolve") continue;
++    const profile = features.find((candidate) => candidate.id === feature.profileId);
++    if (!profile || profile.kind === "extrusion" || profile.kind === "revolve") continue;
++    if (revolveProfileCrossesAxis(profile, feature.axis, feature.axisOffset)) {
++      return new CadFeatureError({
++        code: "geometry_invalid",
++        detail: `Revolve '${feature.id}' profile '${feature.profileId}' crosses or lies on the rotation axis.`,
++      });
++    }
++  }
++  return null;
++};
++
+ const applySingleCommand = (
+   features: CadFeature[],
+   command: CadCommand,
+@@ -258,6 +285,47 @@ const applySingleCommand = (
+       };
+     }
+ 
++    case "sketch.set_polygon_points": {
++      if (existingIndex === -1) {
++        return new CadFeatureError({
++          code: "feature_not_found",
++          detail: `Feature '${command.featureId}' was not found.`,
++        });
++      }
++      const target = features[existingIndex]!;
++      if (target.kind !== "polygon") {
++        return new CadFeatureError({
++          code: "invalid_parameter",
++          detail: `Feature '${command.featureId}' is not a polygon sketch.`,
++        });
++      }
++      for (const [px, py] of command.points) {
++        if (!isValidCoordinate(px) || !isValidCoordinate(py)) {
++          return new CadFeatureError({
++            code: "invalid_parameter",
++            detail: `Polygon '${command.featureId}' coordinates must be within +/-${CAD_MAX_DIMENSION_MM} mm.`,
++          });
++        }
++      }
++      if (!isSimplePolygon(command.points)) {
++        return new CadFeatureError({
++          code: "geometry_invalid",
++          detail: `Polygon '${command.featureId}' must be non-self-intersecting with non-zero area.`,
++        });
++      }
++      const updated = { ...target, points: command.points };
++      const next = [...features];
++      next[existingIndex] = updated;
++      const revolveError = validateDependentRevolves(next);
++      if (revolveError !== null) {
++        return revolveError;
++      }
++      return {
++        features: next,
++        summary: `Updated polygon '${command.featureId}' (${command.points.length} vertices)`,
++      };
++    }
++
+     case "feature.extrude": {
+       if (existingIndex !== -1) {
+         return new CadFeatureError({
+@@ -266,7 +334,7 @@ const applySingleCommand = (
+         });
+       }
+       const profile = features.find((feature) => feature.id === command.profileId);
+-      if (!profile || profile.kind === "extrusion") {
++      if (!profile || profile.kind === "extrusion" || profile.kind === "revolve") {
+         return new CadFeatureError({
+           code: "invalid_reference",
+           detail: `Extrusion '${command.featureId}' requires sketch profile '${command.profileId}'.`,
+@@ -274,10 +342,10 @@ const applySingleCommand = (
+       }
+       if (command.targetBodyId !== undefined) {
+         const targetBody = features.find((feature) => feature.id === command.targetBodyId);
+-        if (!targetBody || targetBody.kind !== "extrusion") {
++        if (!targetBody || (targetBody.kind !== "extrusion" && targetBody.kind !== "revolve")) {
+           return new CadFeatureError({
+             code: "invalid_reference",
+-            detail: `Extrusion '${command.featureId}' targetBodyId '${command.targetBodyId}' must reference an existing extrusion body.`,
++            detail: `Extrusion '${command.featureId}' targetBodyId '${command.targetBodyId}' must reference an existing solid body.`,
+           });
+         }
+       }
+@@ -299,6 +367,68 @@ const applySingleCommand = (
+       };
+     }
+ 
++    case "feature.revolve": {
++      if (existingIndex !== -1) {
++        return new CadFeatureError({
++          code: "duplicate_id",
++          detail: `Feature '${command.featureId}' already exists.`,
++        });
++      }
++      const profile = features.find((feature) => feature.id === command.profileId);
++      if (!profile || profile.kind === "extrusion" || profile.kind === "revolve") {
++        return new CadFeatureError({
++          code: "invalid_reference",
++          detail: `Revolve '${command.featureId}' requires sketch profile '${command.profileId}'.`,
++        });
++      }
++      if (command.targetBodyId !== undefined) {
++        const targetBody = features.find((feature) => feature.id === command.targetBodyId);
++        if (!targetBody || (targetBody.kind !== "extrusion" && targetBody.kind !== "revolve")) {
++          return new CadFeatureError({
++            code: "invalid_reference",
++            detail: `Revolve '${command.featureId}' targetBodyId '${command.targetBodyId}' must reference an existing solid body.`,
++          });
++        }
++      }
++      const axis = command.axis ?? "v";
++      const axisOffset = command.axisOffset ?? 0;
++      const angleDeg = command.angleDeg ?? 360;
++      if (!isValidCoordinate(axisOffset)) {
++        return new CadFeatureError({
++          code: "invalid_parameter",
++          detail: `Parameter 'axisOffset' must be within +/-${CAD_MAX_DIMENSION_MM} mm.`,
++        });
++      }
++      if (!Number.isFinite(angleDeg) || angleDeg <= 0 || angleDeg > 360) {
++        return new CadFeatureError({
++          code: "invalid_parameter",
++          detail: `Parameter 'angleDeg' must be > 0 and <= 360.`,
++        });
++      }
++      if (revolveProfileCrossesAxis(profile, axis, axisOffset)) {
++        return new CadFeatureError({
++          code: "geometry_invalid",
++          detail: `Revolve '${command.featureId}' profile '${command.profileId}' crosses or lies on the rotation axis.`,
++        });
++      }
++      const operation = command.operation ?? "new_body";
++      const nextFeature: CadFeature = {
++        id: command.featureId,
++        kind: "revolve",
++        ...(command.name !== undefined ? { name: command.name } : {}),
++        profileId: command.profileId,
++        axis,
++        axisOffset,
++        angleDeg,
++        operation,
++        ...(command.targetBodyId !== undefined ? { targetBodyId: command.targetBodyId } : {}),
++      };
++      return {
++        features: [...features, nextFeature],
++        summary: `Revolved '${command.profileId}' ${angleDeg}° as ${operation} '${command.featureId}'`,
++      };
++    }
++
+     case "feature.set_parameter": {
+       if (existingIndex === -1) {
+         return new CadFeatureError({
+@@ -320,6 +450,10 @@ const applySingleCommand = (
+           const updated = { ...target, [command.parameter]: value };
+           const next = [...features];
+           next[existingIndex] = updated;
++          const revolveError = validateDependentRevolves(next);
++          if (revolveError !== null) {
++            return revolveError;
++          }
+           return {
+             features: next,
+             summary: `Set ${command.featureId}.${command.parameter} = ${value}`,
+@@ -335,6 +469,10 @@ const applySingleCommand = (
+           const updated = { ...target, [command.parameter]: value };
+           const next = [...features];
+           next[existingIndex] = updated;
++          const revolveError = validateDependentRevolves(next);
++          if (revolveError !== null) {
++            return revolveError;
++          }
+           return {
+             features: next,
+             summary: `Set ${command.featureId}.${command.parameter} = ${value}`,
+@@ -357,6 +495,10 @@ const applySingleCommand = (
+           const updated = { ...target, [command.parameter]: value };
+           const next = [...features];
+           next[existingIndex] = updated;
++          const revolveError = validateDependentRevolves(next);
++          if (revolveError !== null) {
++            return revolveError;
++          }
+           return {
+             features: next,
+             summary: `Set ${command.featureId}.${command.parameter} = ${value}`,
+@@ -372,6 +514,10 @@ const applySingleCommand = (
+           const updated = { ...target, radius: value };
+           const next = [...features];
+           next[existingIndex] = updated;
++          const revolveError = validateDependentRevolves(next);
++          if (revolveError !== null) {
++            return revolveError;
++          }
+           return {
+             features: next,
+             summary: `Set ${command.featureId}.radius = ${value}`,
+@@ -390,6 +536,47 @@ const applySingleCommand = (
+         });
+       }
+ 
++      if (target.kind === "revolve") {
++        if (command.parameter === "axisOffset") {
++          if (!isValidCoordinate(value)) {
++            return new CadFeatureError({
++              code: "invalid_parameter",
++              detail: `Parameter 'axisOffset' must be within +/-${CAD_MAX_DIMENSION_MM} mm.`,
++            });
++          }
++          const updated = { ...target, axisOffset: value };
++          const next = [...features];
++          next[existingIndex] = updated;
++          const revolveError = validateDependentRevolves(next);
++          if (revolveError !== null) {
++            return revolveError;
++          }
++          return {
++            features: next,
++            summary: `Set ${command.featureId}.axisOffset = ${value}`,
++          };
++        }
++        if (command.parameter === "angleDeg") {
++          if (!Number.isFinite(value) || value <= 0 || value > 360) {
++            return new CadFeatureError({
++              code: "invalid_parameter",
++              detail: `Parameter 'angleDeg' must be > 0 and <= 360.`,
++            });
++          }
++          const updated = { ...target, angleDeg: value };
++          const next = [...features];
++          next[existingIndex] = updated;
++          return {
++            features: next,
++            summary: `Set ${command.featureId}.angleDeg = ${value}`,
++          };
++        }
++        return new CadFeatureError({
++          code: "invalid_parameter",
++          detail: `Revolve feature '${command.featureId}' does not have parameter '${command.parameter}'.`,
++        });
++      }
++
+       if (command.parameter === "depth") {
+         if (!isPositiveDimension(value)) {
+           return new CadFeatureError({
+@@ -449,13 +636,26 @@ const applySingleCommand = (
+           detail: `Feature '${command.featureId}' was not found.`,
+         });
+       }
+-      const dependent = features.find(
+-        (feature) => feature.kind === "extrusion" && feature.profileId === command.featureId,
++      const dependentProfile = features.find(
++        (feature) =>
++          (feature.kind === "extrusion" || feature.kind === "revolve") &&
++          feature.profileId === command.featureId,
+       );
+-      if (dependent) {
++      if (dependentProfile) {
+         return new CadFeatureError({
+           code: "feature_in_use",
+-          detail: `Sketch '${command.featureId}' is referenced by extrusion '${dependent.id}'.`,
++          detail: `Sketch '${command.featureId}' is referenced by ${dependentProfile.kind} '${dependentProfile.id}'.`,
++        });
++      }
++      const dependentTarget = features.find(
++        (feature) =>
++          (feature.kind === "extrusion" || feature.kind === "revolve") &&
++          feature.targetBodyId === command.featureId,
++      );
++      if (dependentTarget) {
++        return new CadFeatureError({
++          code: "feature_in_use",
++          detail: `Body '${command.featureId}' is referenced by ${dependentTarget.kind} '${dependentTarget.id}'.`,
+         });
+       }
+       return {
+@@ -673,6 +873,109 @@ const buildLBracketPresetCommands = (): ReadonlyArray<CadCommand> => [
+   },
+ ];
+ 
++const buildSteppedFlangePresetCommands = (): ReadonlyArray<CadCommand> => [
++  {
++    op: "sketch.create_polygon",
++    featureId: CadFeatureId.make("flange_profile"),
++    name: "XZ Turned Section",
++    plane: "xz",
++    points: [
++      [12, 0],
++      [42, 0],
++      [42, 10],
++      [22, 10],
++      [22, 28],
++      [12, 28],
++    ],
++  },
++  {
++    op: "feature.revolve",
++    featureId: CadFeatureId.make("flange_body"),
++    name: "Revolved Flange Body",
++    profileId: CadFeatureId.make("flange_profile"),
++    axis: "v",
++    axisOffset: 0,
++    angleDeg: 360,
++    operation: "new_body",
++  },
++  {
++    op: "sketch.create_circle",
++    featureId: CadFeatureId.make("bolt_pos_x"),
++    name: "Bolt Hole +X M6",
++    plane: "xy",
++    cx: 32,
++    cy: 0,
++    radius: 3.3,
++  },
++  {
++    op: "feature.extrude",
++    featureId: CadFeatureId.make("cut_bolt_pos_x"),
++    name: "Cut Bolt Hole +X",
++    profileId: CadFeatureId.make("bolt_pos_x"),
++    depth: 10,
++    zOffset: 0,
++    operation: "cut",
++    targetBodyId: CadFeatureId.make("flange_body"),
++  },
++  {
++    op: "sketch.create_circle",
++    featureId: CadFeatureId.make("bolt_neg_x"),
++    name: "Bolt Hole -X M6",
++    plane: "xy",
++    cx: -32,
++    cy: 0,
++    radius: 3.3,
++  },
++  {
++    op: "feature.extrude",
++    featureId: CadFeatureId.make("cut_bolt_neg_x"),
++    name: "Cut Bolt Hole -X",
++    profileId: CadFeatureId.make("bolt_neg_x"),
++    depth: 10,
++    zOffset: 0,
++    operation: "cut",
++    targetBodyId: CadFeatureId.make("flange_body"),
++  },
++  {
++    op: "sketch.create_circle",
++    featureId: CadFeatureId.make("bolt_pos_y"),
++    name: "Bolt Hole +Y M6",
++    plane: "xy",
++    cx: 0,
++    cy: 32,
++    radius: 3.3,
++  },
++  {
++    op: "feature.extrude",
++    featureId: CadFeatureId.make("cut_bolt_pos_y"),
++    name: "Cut Bolt Hole +Y",
++    profileId: CadFeatureId.make("bolt_pos_y"),
++    depth: 10,
++    zOffset: 0,
++    operation: "cut",
++    targetBodyId: CadFeatureId.make("flange_body"),
++  },
++  {
++    op: "sketch.create_circle",
++    featureId: CadFeatureId.make("bolt_neg_y"),
++    name: "Bolt Hole -Y M6",
++    plane: "xy",
++    cx: 0,
++    cy: -32,
++    radius: 3.3,
++  },
++  {
++    op: "feature.extrude",
++    featureId: CadFeatureId.make("cut_bolt_neg_y"),
++    name: "Cut Bolt Hole -Y",
++    profileId: CadFeatureId.make("bolt_neg_y"),
++    depth: 10,
++    zOffset: 0,
++    operation: "cut",
++    targetBodyId: CadFeatureId.make("flange_body"),
++  },
++];
++
+ const existingCheckpointsFor = (
+   persisted: PersistedCadDocument,
+ ): ReadonlyArray<RevisionCheckpoint> =>
+@@ -922,6 +1225,9 @@ export class CadDocumentService extends Context.Service<
+     readonly exportStl: (
+       input: CadExportStlInput,
+     ) => Effect.Effect<CadExportStlResult, CadDomainError>;
++    readonly exportObj: (
++      input: CadExportObjInput,
++    ) => Effect.Effect<CadExportObjResult, CadDomainError>;
+     readonly subscribeDocument: (
+       input: CadSubscribeDocumentInput,
+     ) => Stream.Stream<CadDocumentEvent, CadDomainError>;
+@@ -1171,19 +1477,32 @@ const make = Effect.gen(function* () {
+           checkpoints: [{ revision: NonNegativeInt.make(0), features: [] }],
+         };
+ 
+-        if (input.preset === "mounting_plate" || input.preset === "l_bracket") {
+-          const isBracket = input.preset === "l_bracket";
++        if (
++          input.preset === "mounting_plate" ||
++          input.preset === "l_bracket" ||
++          input.preset === "stepped_flange"
++        ) {
++          const presetLabel =
++            input.preset === "l_bracket"
++              ? "3D L-Bracket Preset"
++              : input.preset === "stepped_flange"
++                ? "Turned Stepped Flange Preset"
++                : "Mounting Plate Preset";
++          const presetCommands =
++            input.preset === "l_bracket"
++              ? buildLBracketPresetCommands()
++              : input.preset === "stepped_flange"
++                ? buildSteppedFlangePresetCommands()
++                : buildMountingPlatePresetCommands();
+           const outcome = applyCadCommands(persisted, {
+             requestId: CadRequestId.make(`init:${input.documentId}`),
+             expectedRevision: 0,
+             actor: input.actor ?? {
+               kind: "user",
+               id: "preset",
+-              label: isBracket ? "3D L-Bracket Preset" : "Mounting Plate Preset",
++              label: presetLabel,
+             },
+-            commands: isBracket
+-              ? buildLBracketPresetCommands()
+-              : buildMountingPlatePresetCommands(),
++            commands: presetCommands,
+             timestamp: now,
+           });
+           if (!("persisted" in outcome)) {
+@@ -1286,6 +1605,46 @@ const make = Effect.gen(function* () {
+     );
+   });
+ 
++  const writeWorkspaceExport = Effect.fn("CadDocumentService.writeWorkspaceExport")(function* (
++    workspaceRoot: string,
++    relativePath: string | undefined,
++    content: string,
++    formatLabel: string,
++  ) {
++    if (relativePath === undefined) return null;
++    const resolvedOutput = yield* workspacePaths
++      .resolveRelativePathWithinRoot({
++        workspaceRoot,
++        relativePath,
++      })
++      .pipe(
++        Effect.mapError(
++          (cause) =>
++            new CadInvalidInputError({
++              detail: cause.message,
++            }),
++        ),
++      );
++    const parentDir = path.dirname(resolvedOutput.absolutePath);
++    yield* fileSystem.makeDirectory(parentDir, { recursive: true }).pipe(
++      Effect.mapError(
++        (cause) =>
++          new CadStorageError({
++            detail: `Failed to prepare ${formatLabel} output directory: ${String(cause)}`,
++          }),
++      ),
++    );
++    yield* fileSystem.writeFileString(resolvedOutput.absolutePath, content).pipe(
++      Effect.mapError(
++        (cause) =>
++          new CadStorageError({
++            detail: `Failed to write ${formatLabel} file '${resolvedOutput.relativePath}': ${String(cause)}`,
++          }),
++      ),
++    );
++    return resolvedOutput.relativePath;
++  });
++
+   const exportStl: CadDocumentService["Service"]["exportStl"] = Effect.fn(
+     "CadDocumentService.exportStl",
+   )(function* (input) {
+@@ -1295,41 +1654,12 @@ const make = Effect.gen(function* () {
+     const { snapshot } = persisted;
+     const { stlAscii, triangleCount } = generateAsciiStl(snapshot.name, snapshot.report);
+     const filename = `${snapshot.documentId}-r${snapshot.revision}.stl`;
+-    let writtenPath: string | null = null;
+-
+-    if (input.relativePath !== undefined) {
+-      const resolvedOutput = yield* workspacePaths
+-        .resolveRelativePathWithinRoot({
+-          workspaceRoot,
+-          relativePath: input.relativePath,
+-        })
+-        .pipe(
+-          Effect.mapError(
+-            (cause) =>
+-              new CadInvalidInputError({
+-                detail: cause.message,
+-              }),
+-          ),
+-        );
+-      const parentDir = path.dirname(resolvedOutput.absolutePath);
+-      yield* fileSystem.makeDirectory(parentDir, { recursive: true }).pipe(
+-        Effect.mapError(
+-          (cause) =>
+-            new CadStorageError({
+-              detail: `Failed to prepare STL output directory: ${String(cause)}`,
+-            }),
+-        ),
+-      );
+-      yield* fileSystem.writeFileString(resolvedOutput.absolutePath, stlAscii).pipe(
+-        Effect.mapError(
+-          (cause) =>
+-            new CadStorageError({
+-              detail: `Failed to write STL file '${resolvedOutput.relativePath}': ${String(cause)}`,
+-            }),
+-        ),
+-      );
+-      writtenPath = resolvedOutput.relativePath;
+-    }
++    const writtenPath = yield* writeWorkspaceExport(
++      workspaceRoot,
++      input.relativePath,
++      stlAscii,
++      "STL",
++    );
+ 
+     return {
+       documentId: snapshot.documentId,
+@@ -1342,6 +1672,37 @@ const make = Effect.gen(function* () {
+     };
+   });
+ 
++  const exportObj: CadDocumentService["Service"]["exportObj"] = Effect.fn(
++    "CadDocumentService.exportObj",
++  )(function* (input) {
++    const workspaceRoot = yield* resolveProjectRoot(input.projectId);
++    const filePath = yield* resolveDocumentPath(workspaceRoot, input.documentId);
++    const persisted = yield* readPersistedFile(filePath, input.documentId);
++    const { snapshot } = persisted;
++    const { objText, vertexCount, triangleCount } = generateWavefrontObj(
++      snapshot.name,
++      snapshot.report,
++    );
++    const filename = `${snapshot.documentId}-r${snapshot.revision}.obj`;
++    const writtenPath = yield* writeWorkspaceExport(
++      workspaceRoot,
++      input.relativePath,
++      objText,
++      "OBJ",
++    );
++
++    return {
++      documentId: snapshot.documentId,
++      revision: snapshot.revision,
++      filename,
++      writtenPath,
++      vertexCount: NonNegativeInt.make(vertexCount),
++      triangleCount: NonNegativeInt.make(triangleCount),
++      byteLength: NonNegativeInt.make(Buffer.byteLength(objText, "utf8")),
++      objText,
++    };
++  });
++
+   const subscribeDocument: CadDocumentService["Service"]["subscribeDocument"] = (input) =>
+     Stream.unwrap(
+       Effect.gen(function* () {
+@@ -1382,6 +1743,7 @@ const make = Effect.gen(function* () {
+     applyCommands,
+     restoreRevision,
+     exportStl,
++    exportObj,
+     subscribeDocument,
+     subscribeProject,
+   });
+diff --git a/apps/server/src/cad/CadKernel.test.ts b/apps/server/src/cad/CadKernel.test.ts
+index b3093016..73a9d46a 100644
+--- a/apps/server/src/cad/CadKernel.test.ts
++++ b/apps/server/src/cad/CadKernel.test.ts
+@@ -1,7 +1,7 @@
+ import { CadFeatureId, type CadFeature } from "@t3tools/contracts";
+ import { describe, expect, it } from "vite-plus/test";
+ 
+-import { evaluateCadFeatures, generateAsciiStl } from "./CadKernel.ts";
++import { evaluateCadFeatures, generateAsciiStl, generateWavefrontObj } from "./CadKernel.ts";
+ 
+ const fid = (value: string) => CadFeatureId.make(value);
+ 
+@@ -244,4 +244,108 @@ describe("CadKernel", () => {
+     expect(report.totalVolumeMm3).toBeCloseTo(10 * 10 * 10, 3);
+     expect(report.boundsMm).toEqual({ min: [5, 5, 0], max: [15, 15, 10] });
+   });
++
++  it("evaluates 360° and partial revolves across planes with outward normals and OBJ export", () => {
++    const features: CadFeature[] = [
++      {
++        id: fid("xz_stepped"),
++        kind: "polygon",
++        plane: "xz",
++        points: [
++          [10, 0],
++          [30, 0],
++          [30, 10],
++          [20, 10],
++          [20, 25],
++          [10, 25],
++        ],
++      },
++      {
++        id: fid("flange_rev"),
++        kind: "revolve",
++        profileId: fid("xz_stepped"),
++        axis: "v",
++        axisOffset: 0,
++        angleDeg: 360,
++        operation: "new_body",
++      },
++      {
++        id: fid("xy_half_rect"),
++        kind: "rectangle",
++        plane: "xy",
++        x: 10,
++        y: 0,
++        width: 10,
++        height: 15,
++      },
++      {
++        id: fid("neg_side_half"),
++        kind: "revolve",
++        profileId: fid("xy_half_rect"),
++        axis: "v",
++        axisOffset: 30,
++        angleDeg: 180,
++        operation: "new_body",
++      },
++    ];
++
++    const report = evaluateCadFeatures(features);
++    expect(report.status).toBe("valid");
++    expect(report.watertight).toBe(true);
++    expect(report.bodies).toHaveLength(2);
++
++    // Full 360° stepped flange analytic volume = pi * ((30^2 - 10^2)*10 + (20^2 - 10^2)*15) = 12500 * pi
++    const flangeAnalytic = Math.PI * (800 * 10 + 300 * 15);
++    expect(report.bodies[0]?.volumeMm3).toBeGreaterThan(flangeAnalytic * 0.99);
++    expect(report.bodies[0]?.volumeMm3).toBeLessThan(flangeAnalytic * 1.01);
++    expect(report.bodies[0]?.boundsMm).toEqual({ min: [-30, -30, 0], max: [30, 30, 25] });
++
++    // Half 180° annular sector: r in [10, 20], height 15 => 0.5 * pi * (20^2 - 10^2) * 15 = 2250 * pi
++    const halfAnalytic = 0.5 * Math.PI * (400 - 100) * 15;
++    expect(report.bodies[1]?.volumeMm3).toBeGreaterThan(halfAnalytic * 0.99);
++    expect(report.bodies[1]?.volumeMm3).toBeLessThan(halfAnalytic * 1.01);
++
++    for (const body of report.bodies) {
++      let signedVolume6 = 0;
++      for (let i = 0; i < body.indices.length; i += 3) {
++        const i0 = body.indices[i]! * 3;
++        const i1 = body.indices[i + 1]! * 3;
++        const i2 = body.indices[i + 2]! * 3;
++        const v0 = [body.positions[i0]!, body.positions[i0 + 1]!, body.positions[i0 + 2]!] as const;
++        const v1 = [body.positions[i1]!, body.positions[i1 + 1]!, body.positions[i1 + 2]!] as const;
++        const v2 = [body.positions[i2]!, body.positions[i2 + 1]!, body.positions[i2 + 2]!] as const;
++        signedVolume6 +=
++          v0[0] * (v1[1] * v2[2] - v1[2] * v2[1]) +
++          v0[1] * (v1[2] * v2[0] - v1[0] * v2[2]) +
++          v0[2] * (v1[0] * v2[1] - v1[1] * v2[0]);
++      }
++      expect(signedVolume6 / 6).toBeCloseTo(body.volumeMm3, 1);
++    }
++
++    const obj = generateWavefrontObj("revolve_parts", report);
++    expect(obj.triangleCount).toBe(
++      (report.bodies[0]?.triangleCount ?? 0) + (report.bodies[1]?.triangleCount ?? 0),
++    );
++    expect(obj.vertexCount).toBe(obj.triangleCount * 3);
++    expect(obj.objText).toContain("o flange_rev\n");
++    expect(obj.objText).toContain("o neg_side_half\n");
++    expect(obj.objText).toContain("vn ");
++    expect(obj.objText).toContain("f 1//1 2//2 3//3");
++  });
++
++  it("rejects revolves whose profile crosses the rotation axis", () => {
++    const features: CadFeature[] = [
++      { id: fid("crossing"), kind: "rectangle", plane: "xz", x: -5, y: 0, width: 20, height: 10 },
++      {
++        id: fid("bad_rev"),
++        kind: "revolve",
++        profileId: fid("crossing"),
++        axis: "v",
++        axisOffset: 0,
++        angleDeg: 360,
++        operation: "new_body",
++      },
++    ];
++    expect(() => evaluateCadFeatures(features)).toThrow(/crosses or lies on the rotation axis/);
++  });
+ });
+diff --git a/apps/server/src/cad/CadKernel.ts b/apps/server/src/cad/CadKernel.ts
+index 5a2c5290..be704e26 100644
+--- a/apps/server/src/cad/CadKernel.ts
++++ b/apps/server/src/cad/CadKernel.ts
+@@ -4,6 +4,8 @@ import type {
+   CadFeature,
+   CadGeometryReport,
+   CadMeshBody,
++  CadRevolveAxis,
++  CadRevolveFeature,
+   CadSketchPlane,
+   CadVec2,
+ } from "@t3tools/contracts";
+@@ -530,41 +532,30 @@ const boundsFromPlaneBox = (
+   };
+ };
+ 
+-const buildSolidForExtrusion = (
+-  extrusion: CadExtrusionFeature,
+-  byId: ReadonlyMap<string, CadFeature>,
+-): { readonly solid: CsgSolid; readonly bounds: CadBoundsMm } => {
+-  const profile = byId.get(extrusion.profileId);
+-  if (!profile || profile.kind === "extrusion") {
+-    throw new Error(
+-      `Extrusion '${extrusion.id}' references missing or non-profile '${extrusion.profileId}'.`,
+-    );
+-  }
+-  const w0 = extrusion.zOffset;
+-  const w1 = extrusion.zOffset + extrusion.depth;
++const profileToRingAndPlane = (
++  profile: Exclude<CadFeature, CadExtrusionFeature | CadRevolveFeature>,
++): {
++  readonly plane: CadSketchPlane;
++  readonly ccwRing: ReadonlyArray<Vec2>;
++  readonly convex: boolean;
++} => {
+   const plane: CadSketchPlane = profile.plane ?? "xy";
+-
+   if (profile.kind === "rectangle") {
+     const u0 = profile.x;
+     const v0 = profile.y;
+     const u1 = profile.x + profile.width;
+     const v1 = profile.y + profile.height;
+     return {
+-      solid: extrudeConvexRing(
+-        [
+-          [u0, v0],
+-          [u1, v0],
+-          [u1, v1],
+-          [u0, v1],
+-        ],
+-        plane,
+-        w0,
+-        w1,
+-      ),
+-      bounds: boundsFromPlaneBox(plane, u0, u1, v0, v1, w0, w1),
++      plane,
++      ccwRing: [
++        [u0, v0],
++        [u1, v0],
++        [u1, v1],
++        [u0, v1],
++      ],
++      convex: true,
+     };
+   }
+-
+   if (profile.kind === "circle") {
+     const ring: Vec2[] = [];
+     for (let i = 0; i < CIRCLE_SEGMENTS; i++) {
+@@ -574,36 +565,206 @@ const buildSolidForExtrusion = (
+         profile.cy + profile.radius * Math.sin(angle),
+       ]);
+     }
+-    return {
+-      solid: extrudeConvexRing(ring, plane, w0, w1),
+-      bounds: boundsFromPlaneBox(
+-        plane,
+-        profile.cx - profile.radius,
+-        profile.cx + profile.radius,
+-        profile.cy - profile.radius,
+-        profile.cy + profile.radius,
+-        w0,
+-        w1,
+-      ),
+-    };
++    return { plane, ccwRing: ring, convex: true };
++  }
++  const cleaned = deduplicateRing(profile.points);
++  const ccwRing = signedPolygonArea2(cleaned) < 0 ? [...cleaned].reverse() : cleaned;
++  return { plane, ccwRing, convex: false };
++};
++
++export const revolveProfileCrossesAxis = (
++  profile: Exclude<CadFeature, CadExtrusionFeature | CadRevolveFeature>,
++  axis: CadRevolveAxis,
++  axisOffset: number,
++): boolean => {
++  let minR = Infinity;
++  let maxR = -Infinity;
++  if (profile.kind === "rectangle") {
++    const c0 = axis === "v" ? profile.x : profile.y;
++    const c1 = axis === "v" ? profile.x + profile.width : profile.y + profile.height;
++    minR = Math.min(c0, c1) - axisOffset;
++    maxR = Math.max(c0, c1) - axisOffset;
++  } else if (profile.kind === "circle") {
++    const center = axis === "v" ? profile.cx : profile.cy;
++    minR = center - profile.radius - axisOffset;
++    maxR = center + profile.radius - axisOffset;
++  } else {
++    for (const [u, v] of profile.points) {
++      const r = (axis === "v" ? u : v) - axisOffset;
++      if (r < minR) minR = r;
++      if (r > maxR) maxR = r;
++    }
++  }
++  if (minR < -1e-6 && maxR > 1e-6) return true;
++  if (Math.max(Math.abs(minR), Math.abs(maxR)) <= 1e-6) return true;
++  return false;
++};
++
++const buildSolidForExtrusion = (
++  extrusion: CadExtrusionFeature,
++  byId: ReadonlyMap<string, CadFeature>,
++): { readonly solid: CsgSolid; readonly bounds: CadBoundsMm } => {
++  const profile = byId.get(extrusion.profileId);
++  if (!profile || profile.kind === "extrusion" || profile.kind === "revolve") {
++    throw new Error(
++      `Extrusion '${extrusion.id}' references missing or non-profile '${extrusion.profileId}'.`,
++    );
+   }
++  const w0 = extrusion.zOffset;
++  const w1 = extrusion.zOffset + extrusion.depth;
++  const { plane, ccwRing, convex } = profileToRingAndPlane(profile);
+ 
+   let minU = Infinity;
+   let minV = Infinity;
+   let maxU = -Infinity;
+   let maxV = -Infinity;
+-  for (const [u, v] of profile.points) {
++  for (const [u, v] of ccwRing) {
+     if (u < minU) minU = u;
+     if (v < minV) minV = v;
+     if (u > maxU) maxU = u;
+     if (v > maxV) maxV = v;
+   }
++  if (profile.kind === "circle") {
++    minU = profile.cx - profile.radius;
++    maxU = profile.cx + profile.radius;
++    minV = profile.cy - profile.radius;
++    maxV = profile.cy + profile.radius;
++  }
++
+   return {
+-    solid: extrudeArbitraryRing(profile.points, plane, w0, w1),
++    solid: convex
++      ? extrudeConvexRing(ccwRing, plane, w0, w1)
++      : extrudeArbitraryRing(ccwRing, plane, w0, w1),
+     bounds: boundsFromPlaneBox(plane, minU, maxU, minV, maxV, w0, w1),
+   };
+ };
+ 
++const buildSolidForRevolve = (
++  revolve: CadRevolveFeature,
++  byId: ReadonlyMap<string, CadFeature>,
++): { readonly solid: CsgSolid; readonly bounds: CadBoundsMm } => {
++  const profile = byId.get(revolve.profileId);
++  if (!profile || profile.kind === "extrusion" || profile.kind === "revolve") {
++    throw new Error(
++      `Revolve '${revolve.id}' references missing or non-profile '${revolve.profileId}'.`,
++    );
++  }
++  if (revolveProfileCrossesAxis(profile, revolve.axis, revolve.axisOffset)) {
++    throw new Error(
++      `Revolve '${revolve.id}' profile '${revolve.profileId}' crosses or lies on the rotation axis.`,
++    );
++  }
++
++  const { plane, ccwRing } = profileToRingAndPlane(profile);
++  if (ccwRing.length < 3) {
++    return { solid: new CsgSolid([]), bounds: { min: [0, 0, 0], max: [0, 0, 0] } };
++  }
++
++  const radial = (pt: Vec2): number => (revolve.axis === "v" ? pt[0] : pt[1]) - revolve.axisOffset;
++  const axial = (pt: Vec2): number => (revolve.axis === "v" ? pt[1] : pt[0]);
++
++  const hasNeg = ccwRing.some((pt) => radial(pt) < -1e-6);
++  const flipWinding = isLeftHandedPlane(plane) !== hasNeg;
++  const orientedRing = flipWinding ? [...ccwRing].reverse() : ccwRing;
++
++  const angleRad = (revolve.angleDeg * Math.PI) / 180;
++  const isFullCircle = Math.abs(revolve.angleDeg - 360) <= 1e-6;
++  const segments = Math.max(8, Math.round((CIRCLE_SEGMENTS * revolve.angleDeg) / 360));
++
++  const pointAt = (pt: Vec2, theta: number): Vec3 => {
++    const r = radial(pt);
++    const cosT = Math.cos(theta);
++    const sinT = Math.sin(theta);
++    if (revolve.axis === "v") {
++      return planeToVec3(plane, revolve.axisOffset + r * cosT, pt[1], r * sinT);
++    }
++    return planeToVec3(plane, pt[0], revolve.axisOffset + r * cosT, r * sinT);
++  };
++
++  const polygons: Polygon[] = [];
++  const n = orientedRing.length;
++  let minX = Infinity;
++  let minY = Infinity;
++  let minZ = Infinity;
++  let maxX = -Infinity;
++  let maxY = -Infinity;
++  let maxZ = -Infinity;
++
++  const includeBounds = (p: Vec3) => {
++    if (p.x < minX) minX = p.x;
++    if (p.y < minY) minY = p.y;
++    if (p.z < minZ) minZ = p.z;
++    if (p.x > maxX) maxX = p.x;
++    if (p.y > maxY) maxY = p.y;
++    if (p.z > maxZ) maxZ = p.z;
++  };
++
++  for (let k = 0; k < segments; k++) {
++    const theta0 = (angleRad * k) / segments;
++    const theta1 = isFullCircle && k === segments - 1 ? 0 : (angleRad * (k + 1)) / segments;
++
++    for (let i = 0; i < n; i++) {
++      const j = (i + 1) % n;
++      const a = orientedRing[i]!;
++      const b = orientedRing[j]!;
++      const ra = radial(a);
++      const rb = radial(b);
++      const onAxisA = Math.abs(ra) <= 1e-6;
++      const onAxisB = Math.abs(rb) <= 1e-6;
++      if (onAxisA && onAxisB) continue;
++
++      const p00 = pointAt(a, theta0);
++      const p10 = pointAt(b, theta0);
++      const p01 = pointAt(a, theta1);
++      const p11 = pointAt(b, theta1);
++      includeBounds(p00);
++      includeBounds(p10);
++      includeBounds(p01);
++      includeBounds(p11);
++
++      if (onAxisA) {
++        const tri = makePolygon([p00, p10, p11]);
++        if (tri) polygons.push(tri);
++      } else if (onAxisB) {
++        const tri = makePolygon([p00, p10, p01]);
++        if (tri) polygons.push(tri);
++      } else if (Math.abs(ra - rb) <= 1e-6 || Math.abs(axial(a) - axial(b)) <= 1e-6) {
++        const quad = makePolygon([p00, p10, p11, p01]);
++        if (quad) polygons.push(quad);
++      } else {
++        const triA = makePolygon([p00, p10, p11]);
++        const triB = makePolygon([p00, p11, p01]);
++        if (triA) polygons.push(triA);
++        if (triB) polygons.push(triB);
++      }
++    }
++  }
++
++  if (!isFullCircle) {
++    const trianglesCcw = triangulateSimplePolygonCcw(ccwRing);
++    const orientedTriangles = flipWinding
++      ? trianglesCcw.map(([a, b, c]) => [a, c, b] as const)
++      : trianglesCcw;
++    for (const [a, b, c] of orientedTriangles) {
++      const startCap = makePolygon([pointAt(a, 0), pointAt(c, 0), pointAt(b, 0)]);
++      if (startCap) polygons.push(startCap);
++      const endCap = makePolygon([
++        pointAt(a, angleRad),
++        pointAt(b, angleRad),
++        pointAt(c, angleRad),
++      ]);
++      if (endCap) polygons.push(endCap);
++    }
++  }
++
++  return {
++    solid: new CsgSolid(polygons),
++    bounds: Number.isFinite(minX)
++      ? { min: [minX, minY, minZ], max: [maxX, maxY, maxZ] }
++      : { min: [0, 0, 0], max: [0, 0, 0] },
++  };
++};
++
+ const boundsOverlap = (a: CadBoundsMm, b: CadBoundsMm): boolean =>
+   a.min[0] <= b.max[0] + EPSILON &&
+   a.max[0] >= b.min[0] - EPSILON &&
+@@ -817,15 +978,19 @@ export const evaluateCadFeatures = (features: ReadonlyArray<CadFeature>): CadGeo
+   }
+ 
+   const activeBodies: Array<{
+-    feature: CadExtrusionFeature;
++    feature: CadExtrusionFeature | CadRevolveFeature;
+     solid: CsgSolid;
+     bounds: CadBoundsMm;
+   }> = [];
+   const warnings: string[] = [];
+ 
+   for (const feature of features) {
+-    if (feature.kind !== "extrusion") continue;
+-    const { solid, bounds } = buildSolidForExtrusion(feature, byId);
++    if (feature.kind !== "extrusion" && feature.kind !== "revolve") continue;
++    const { solid, bounds } =
++      feature.kind === "extrusion"
++        ? buildSolidForExtrusion(feature, byId)
++        : buildSolidForRevolve(feature, byId);
++    const kindLabel = feature.kind === "revolve" ? "revolve" : "extrusion";
+     if (feature.operation === "new_body") {
+       activeBodies.push({ feature, solid, bounds });
+       continue;
+@@ -835,7 +1000,7 @@ export const evaluateCadFeatures = (features: ReadonlyArray<CadFeature>): CadGeo
+       const target = activeBodies.find((entry) => entry.feature.id === feature.targetBodyId);
+       if (!target) {
+         warnings.push(
+-          `Operation '${feature.operation}' extrusion '${feature.id}' target body '${feature.targetBodyId}' was not found.`,
++          `Operation '${feature.operation}' ${kindLabel} '${feature.id}' target body '${feature.targetBodyId}' was not found.`,
+         );
+         continue;
+       }
+@@ -845,7 +1010,7 @@ export const evaluateCadFeatures = (features: ReadonlyArray<CadFeature>): CadGeo
+       } else if (feature.operation === "cut") {
+         if (!boundsOverlap(target.bounds, bounds)) {
+           warnings.push(
+-            `Cut extrusion '${feature.id}' does not intersect target body '${target.feature.id}'.`,
++            `Cut ${kindLabel} '${feature.id}' does not intersect target body '${target.feature.id}'.`,
+           );
+         } else {
+           target.solid = target.solid.subtract(solid);
+@@ -854,7 +1019,7 @@ export const evaluateCadFeatures = (features: ReadonlyArray<CadFeature>): CadGeo
+         if (!boundsOverlap(target.bounds, bounds)) {
+           target.solid = new CsgSolid([]);
+           warnings.push(
+-            `Intersect extrusion '${feature.id}' does not overlap target body '${target.feature.id}'.`,
++            `Intersect ${kindLabel} '${feature.id}' does not overlap target body '${target.feature.id}'.`,
+           );
+         } else {
+           target.solid = target.solid.intersect(solid);
+@@ -867,7 +1032,7 @@ export const evaluateCadFeatures = (features: ReadonlyArray<CadFeature>): CadGeo
+     if (feature.operation === "union") {
+       if (activeBodies.length === 0) {
+         warnings.push(
+-          `Union extrusion '${feature.id}' had no existing body to merge into; created a new body.`,
++          `Union ${kindLabel} '${feature.id}' had no existing body to merge into; created a new body.`,
+         );
+         activeBodies.push({ feature, solid, bounds });
+       } else {
+@@ -892,7 +1057,7 @@ export const evaluateCadFeatures = (features: ReadonlyArray<CadFeature>): CadGeo
+       }
+       if (!overlappedAny) {
+         warnings.push(
+-          `Intersect extrusion '${feature.id}' does not overlap any existing solid body.`,
++          `Intersect ${kindLabel} '${feature.id}' does not overlap any existing solid body.`,
+         );
+       }
+       continue;
+@@ -906,7 +1071,7 @@ export const evaluateCadFeatures = (features: ReadonlyArray<CadFeature>): CadGeo
+       target.solid = target.solid.subtract(solid);
+     }
+     if (!intersectedAny) {
+-      warnings.push(`Cut extrusion '${feature.id}' does not intersect any existing solid body.`);
++      warnings.push(`Cut ${kindLabel} '${feature.id}' does not intersect any existing solid body.`);
+     }
+   }
+ 
+@@ -947,8 +1112,8 @@ export const evaluateCadFeatures = (features: ReadonlyArray<CadFeature>): CadGeo
+     bodies,
+     warnings,
+     limitations: [
+-      `Multi-plane extruded solid and CSG mesh kernel (${CIRCLE_SEGMENTS}-segment circular profiles).`,
+-      "Supports XY (+Z), XZ (+Y), and YZ (+X) sketch planes, simple polygons, and new_body/union/cut/intersect booleans.",
++      `Multi-plane extruded & revolved solid CSG mesh kernel (${CIRCLE_SEGMENTS}-segment circular profiles).`,
++      "Supports XY (+Z), XZ (+Y), and YZ (+X) sketch planes, simple polygons, revolve solids, and new_body/union/cut/intersect booleans.",
+       "No fillets, chamfers, STEP/IGES B-rep export, or FEA/tolerance checks.",
+     ],
+   };
+@@ -987,3 +1152,37 @@ export const generateAsciiStl = (
+   lines.push(`endsolid ${safeName}`);
+   return { stlAscii: `${lines.join("\n")}\n`, triangleCount };
+ };
++
++export const generateWavefrontObj = (
++  documentName: string,
++  report: CadGeometryReport,
++): { readonly objText: string; readonly vertexCount: number; readonly triangleCount: number } => {
++  const safeDoc = documentName.replace(/[^A-Za-z0-9_-]+/g, "_") || "t3cad_part";
++  const lines: string[] = [`# T3CAD Wavefront OBJ Export (${safeDoc})`, "# Units: millimeters"];
++  let vertexOffset = 1;
++  let vertexCount = 0;
++  let triangleCount = 0;
++
++  for (const body of report.bodies) {
++    const objectName = body.featureId.replace(/[^A-Za-z0-9_-]+/g, "_") || "body";
++    lines.push(`o ${objectName}`);
++    const { positions, normals, indices } = body;
++    const bodyVertexCount = Math.floor(positions.length / 3);
++    for (let i = 0; i < bodyVertexCount; i++) {
++      const base = i * 3;
++      lines.push(`v ${positions[base]} ${positions[base + 1]} ${positions[base + 2]}`);
++      lines.push(`vn ${normals[base] ?? 0} ${normals[base + 1] ?? 0} ${normals[base + 2] ?? 1}`);
++    }
++    for (let i = 0; i < indices.length; i += 3) {
++      const a = vertexOffset + indices[i]!;
++      const b = vertexOffset + indices[i + 1]!;
++      const c = vertexOffset + indices[i + 2]!;
++      lines.push(`f ${a}//${a} ${b}//${b} ${c}//${c}`);
++      triangleCount += 1;
++    }
++    vertexOffset += bodyVertexCount;
++    vertexCount += bodyVertexCount;
++  }
++
++  return { objText: `${lines.join("\n")}\n`, vertexCount, triangleCount };
++};
+diff --git a/apps/server/src/mcp/toolkits/cad/CadToolkit.test.ts b/apps/server/src/mcp/toolkits/cad/CadToolkit.test.ts
+index 519c834d..fa772458 100644
+--- a/apps/server/src/mcp/toolkits/cad/CadToolkit.test.ts
++++ b/apps/server/src/mcp/toolkits/cad/CadToolkit.test.ts
+@@ -105,9 +105,11 @@ it.effect("executes full CAD workflow through MCP tools with thread project reso
+           kernel: "t3cad-csg-kernel",
+           sketchPlanes: ["xy", "xz", "yz"],
+           extrusionOperations: ["new_body", "union", "cut", "intersect"],
+-          presets: ["blank", "mounting_plate", "l_bracket"],
++          revolveAxes: ["u", "v"],
++          presets: ["blank", "mounting_plate", "l_bracket", "stepped_flange"],
+           revisionRestore: true,
+           stlExport: true,
++          objExport: true,
+         });
+ 
+         const created = yield* callTool("cad_create_document", {
+@@ -185,6 +187,21 @@ it.effect("executes full CAD workflow through MCP tools with thread project reso
+           },
+         });
+ 
++        const turnedFlange = yield* callTool("cad_create_document", {
++          documentId: "flange_revolve_mcp",
++          name: "MCP Turned Flange",
++          preset: "stepped_flange",
++        });
++        expect(turnedFlange.isError).toBe(false);
++        expect(turnedFlange.structuredContent).toMatchObject({
++          revision: 1,
++          report: {
++            status: "valid",
++            watertight: true,
++            boundsMm: { min: [-42, -42, 0], max: [42, 42, 28] },
++          },
++        });
++
+         const exported = yield* callTool("cad_export_stl", {
+           documentId: "flange_v1",
+         });
+@@ -196,6 +213,19 @@ it.effect("executes full CAD workflow through MCP tools with thread project reso
+         });
+         expect(yield* fs.exists(path.join(workspaceRoot, "exports/flange_v1.stl"))).toBe(true);
+ 
++        const exportedObj = yield* callTool("cad_export_obj", {
++          documentId: "flange_revolve_mcp",
++        });
++        expect(exportedObj.isError).toBe(false);
++        expect(exportedObj.structuredContent).toMatchObject({
++          documentId: "flange_revolve_mcp",
++          revision: 1,
++          writtenPath: "exports/flange_revolve_mcp.obj",
++        });
++        expect(yield* fs.exists(path.join(workspaceRoot, "exports/flange_revolve_mcp.obj"))).toBe(
++          true,
++        );
++
+         const listed = yield* callTool("cad_list_documents", {});
+         expect(listed.isError).toBe(false);
+         expect(listed.structuredContent).toMatchObject({
+@@ -203,6 +233,7 @@ it.effect("executes full CAD workflow through MCP tools with thread project reso
+           documents: expect.arrayContaining([
+             expect.objectContaining({ documentId: "flange_v1", revision: 3 }),
+             expect.objectContaining({ documentId: "bracket_mcp", revision: 1 }),
++            expect.objectContaining({ documentId: "flange_revolve_mcp", revision: 1 }),
+           ]),
+         });
+       }).pipe(Effect.provide(testLayer));
+diff --git a/apps/server/src/mcp/toolkits/cad/handlers.ts b/apps/server/src/mcp/toolkits/cad/handlers.ts
+index ac287f5f..ba55ff0a 100644
+--- a/apps/server/src/mcp/toolkits/cad/handlers.ts
++++ b/apps/server/src/mcp/toolkits/cad/handlers.ts
+@@ -180,4 +180,27 @@ export const layer = McpToolAccess.toLayer(CadToolkit, {
+       };
+     }),
+   ),
++  cad_export_obj: McpToolAccess.writesWithCapability((input) =>
++    Effect.gen(function* () {
++      const context = yield* loadCaller();
++      const projectId = yield* resolveProjectId(context, input.projectId);
++      const cad = yield* CadDocumentService.CadDocumentService;
++      const exported = yield* cad
++        .exportObj({
++          projectId,
++          documentId: input.documentId,
++          relativePath: input.relativePath ?? `exports/${input.documentId}.obj`,
++        })
++        .pipe(Effect.mapError(mapCadDomainError));
++      return {
++        documentId: exported.documentId,
++        revision: exported.revision,
++        filename: exported.filename,
++        writtenPath: exported.writtenPath,
++        vertexCount: exported.vertexCount,
++        triangleCount: exported.triangleCount,
++        byteLength: exported.byteLength,
++      };
++    }),
++  ),
+ });
+diff --git a/apps/server/src/mcp/toolkits/cad/tools.ts b/apps/server/src/mcp/toolkits/cad/tools.ts
+index 5124bd62..3cfcddee 100644
+--- a/apps/server/src/mcp/toolkits/cad/tools.ts
++++ b/apps/server/src/mcp/toolkits/cad/tools.ts
+@@ -70,6 +70,16 @@ export const CadMcpExportStlResult = Schema.Struct({
+   byteLength: NonNegativeInt,
+ });
+ 
++export const CadMcpExportObjResult = Schema.Struct({
++  documentId: CadDocumentId,
++  revision: NonNegativeInt,
++  filename: Schema.String,
++  writtenPath: Schema.NullOr(Schema.String),
++  vertexCount: NonNegativeInt,
++  triangleCount: NonNegativeInt,
++  byteLength: NonNegativeInt,
++});
++
+ const shared = {
+   failure: OrchestratorMcpFailure,
+   failureMode: "return" as const,
+@@ -108,11 +118,13 @@ const CadListDocumentsTool = Tool.make("cad_list_documents", {
+ const CadCreateDocumentTool = Tool.make("cad_create_document", {
+   ...shared,
+   description:
+-    "Create a parametric CAD document in the active project, seeded with 'mounting_plate', 'l_bracket' (multi-plane XY+XZ bracket), or 'blank'.",
++    "Create a parametric CAD document seeded with 'mounting_plate', 'l_bracket', 'stepped_flange' (revolved flange), or 'blank'.",
+   parameters: Schema.Struct({
+     documentId: CadDocumentId,
+     name: Schema.optional(CadFeatureName),
+-    preset: Schema.optional(Schema.Literals(["blank", "mounting_plate", "l_bracket"])),
++    preset: Schema.optional(
++      Schema.Literals(["blank", "mounting_plate", "l_bracket", "stepped_flange"]),
++    ),
+     projectId: Schema.optional(ProjectId),
+   }),
+   success: CadMcpDocumentSnapshot,
+@@ -134,7 +146,7 @@ const CadInspectTool = Tool.make("cad_inspect", {
+ const CadApplyTool = Tool.make("cad_apply", {
+   ...shared,
+   description:
+-    "Apply an atomic batch of CAD commands (create_rectangle, create_circle, create_polygon on xy/xz/yz, extrude with new_body/union/cut/intersect, set_parameter, rename, delete) with expectedRevision and requestId. Units in mm.",
++    "Apply an atomic batch of CAD commands (rectangle/circle/polygon sketches on xy/xz/yz, set_polygon_points, extrude, revolve, set_parameter, rename, delete) with expectedRevision and requestId. Units in mm.",
+   parameters: Schema.Struct({
+     documentId: CadDocumentId,
+     requestId: CadRequestId,
+@@ -188,6 +200,20 @@ const CadExportStlTool = Tool.make("cad_export_stl", {
+   .annotate(Tool.Readonly, false)
+   .annotate(Tool.Destructive, false);
+ 
++const CadExportObjTool = Tool.make("cad_export_obj", {
++  ...shared,
++  description:
++    "Export the evaluated solid geometry of a CAD document as a Wavefront OBJ file inside the project workspace.",
++  parameters: Schema.Struct({
++    documentId: CadDocumentId,
++    relativePath: Schema.optional(Schema.String),
++    projectId: Schema.optional(ProjectId),
++  }),
++  success: CadMcpExportObjResult,
++})
++  .annotate(Tool.Readonly, false)
++  .annotate(Tool.Destructive, false);
++
+ export const CadToolkit = Toolkit.make(
+   CadCapabilitiesTool,
+   CadListDocumentsTool,
+@@ -196,4 +222,5 @@ export const CadToolkit = Toolkit.make(
+   CadApplyTool,
+   CadRestoreRevisionTool,
+   CadExportStlTool,
++  CadExportObjTool,
+ );
+diff --git a/apps/server/src/observability/RpcInstrumentation.ts b/apps/server/src/observability/RpcInstrumentation.ts
+index 257970f3..1b8c54ae 100644
+--- a/apps/server/src/observability/RpcInstrumentation.ts
++++ b/apps/server/src/observability/RpcInstrumentation.ts
+@@ -236,6 +236,7 @@ const RPC_AGGREGATES = {
+   [WS_METHODS.cadApply]: "cad",
+   [WS_METHODS.cadRestoreRevision]: "cad",
+   [WS_METHODS.cadExportStl]: "cad",
++  [WS_METHODS.cadExportObj]: "cad",
+   [WS_METHODS.cadSubscribeDocument]: "cad",
+   [WS_METHODS.cadSubscribeProject]: "cad",
+ } as const satisfies Readonly<Record<WsRpcMethod, string>>;
+diff --git a/apps/server/src/provider/agentContextBudget.json b/apps/server/src/provider/agentContextBudget.json
+index 7004400e..c6b3e276 100644
+--- a/apps/server/src/provider/agentContextBudget.json
++++ b/apps/server/src/provider/agentContextBudget.json
+@@ -1,5 +1,5 @@
+ {
+   "claudeSystemAppendBytes": 5632,
+   "codexAdditionalContextBytes": 7360,
+-  "mcpToolListJsonBytes": 35565
++  "mcpToolListJsonBytes": 36109
+ }
+diff --git a/apps/server/src/ws.ts b/apps/server/src/ws.ts
+index 07ac6d10..409cba49 100644
+--- a/apps/server/src/ws.ts
++++ b/apps/server/src/ws.ts
+@@ -3519,6 +3519,7 @@ export const layerWsRpc = (
+         [WS_METHODS.cadApply]: (input) => cadDocuments.applyCommands(input),
+         [WS_METHODS.cadRestoreRevision]: (input) => cadDocuments.restoreRevision(input),
+         [WS_METHODS.cadExportStl]: (input) => cadDocuments.exportStl(input),
++        [WS_METHODS.cadExportObj]: (input) => cadDocuments.exportObj(input),
+         [WS_METHODS.cadSubscribeDocument]: (input) => cadDocuments.subscribeDocument(input),
+         [WS_METHODS.cadSubscribeProject]: (input) => cadDocuments.subscribeProject(input),
+       });
+diff --git a/apps/web/src/components/cad/CadSketchBlueprint.tsx b/apps/web/src/components/cad/CadSketchBlueprint.tsx
+new file mode 100644
+index 00000000..1093d393
+--- /dev/null
++++ b/apps/web/src/components/cad/CadSketchBlueprint.tsx
+@@ -0,0 +1,242 @@
++import type { CadFeature, CadRevolveFeature, CadSketchPlane } from "@t3tools/contracts";
++
++type SketchFeature = Extract<CadFeature, { kind: "rectangle" | "circle" | "polygon" }>;
++
++interface CadSketchBlueprintProps {
++  readonly sketch: SketchFeature;
++  readonly draftValues?: Readonly<Record<string, string>>;
++  readonly draftPoints?: ReadonlyArray<readonly [string, string]>;
++  readonly dependentRevolve?: CadRevolveFeature | undefined;
++}
++
++const PLANE_AXIS_LABELS: Record<CadSketchPlane, readonly [string, string]> = {
++  xy: ["X", "Y"],
++  xz: ["X", "Z"],
++  yz: ["Y", "Z"],
++};
++
++function numOrFallback(raw: string | undefined, fallback: number): number {
++  if (raw === undefined || raw.trim() === "") return fallback;
++  const n = Number(raw);
++  return Number.isFinite(n) ? n : fallback;
++}
++
++export function CadSketchBlueprint({
++  sketch,
++  draftValues,
++  draftPoints,
++  dependentRevolve,
++}: CadSketchBlueprintProps) {
++  const plane: CadSketchPlane = sketch.plane ?? "xy";
++  const [uLabel, vLabel] = PLANE_AXIS_LABELS[plane];
++
++  let minU = 0;
++  let maxU = 0;
++  let minV = 0;
++  let maxV = 0;
++
++  let rectSpec: { x: number; y: number; width: number; height: number } | null = null;
++  let circleSpec: { cx: number; cy: number; radius: number } | null = null;
++  let polyNodes: Array<{
++    readonly key: string;
++    readonly label: string;
++    readonly u: number;
++    readonly v: number;
++  }> | null = null;
++
++  if (sketch.kind === "rectangle") {
++    const x = numOrFallback(draftValues?.x, sketch.x);
++    const y = numOrFallback(draftValues?.y, sketch.y);
++    const width = Math.max(0.01, numOrFallback(draftValues?.width, sketch.width));
++    const height = Math.max(0.01, numOrFallback(draftValues?.height, sketch.height));
++    rectSpec = { x, y, width, height };
++    minU = Math.min(0, x, x + width);
++    maxU = Math.max(0, x, x + width);
++    minV = Math.min(0, y, y + height);
++    maxV = Math.max(0, y, y + height);
++  } else if (sketch.kind === "circle") {
++    const cx = numOrFallback(draftValues?.cx, sketch.cx);
++    const cy = numOrFallback(draftValues?.cy, sketch.cy);
++    const radius = Math.max(0.01, numOrFallback(draftValues?.radius, sketch.radius));
++    circleSpec = { cx, cy, radius };
++    minU = Math.min(0, cx - radius);
++    maxU = Math.max(0, cx + radius);
++    minV = Math.min(0, cy - radius);
++    maxV = Math.max(0, cy + radius);
++  } else {
++    const seen = new Map<string, number>();
++    const rawList = draftPoints ?? sketch.points.map(([u, v]) => [String(u), String(v)] as const);
++    polyNodes = [];
++    for (let i = 0; i < rawList.length; i += 1) {
++      const pair = rawList[i]!;
++      const fb = sketch.points[i] ?? [0, 0];
++      const u = numOrFallback(pair[0], fb[0]);
++      const v = numOrFallback(pair[1], fb[1]);
++      const coordKey = `${u},${v}`;
++      const occ = (seen.get(coordKey) ?? 0) + 1;
++      seen.set(coordKey, occ);
++      polyNodes.push({ key: `${coordKey}#${occ}`, label: String(i), u, v });
++      if (u < minU) minU = u;
++      if (u > maxU) maxU = u;
++      if (v < minV) minV = v;
++      if (v > maxV) maxV = v;
++    }
++  }
++
++  if (dependentRevolve) {
++    if (dependentRevolve.axis === "v") {
++      minU = Math.min(minU, dependentRevolve.axisOffset);
++      maxU = Math.max(maxU, dependentRevolve.axisOffset);
++    } else {
++      minV = Math.min(minV, dependentRevolve.axisOffset);
++      maxV = Math.max(maxV, dependentRevolve.axisOffset);
++    }
++  }
++
++  const span = Math.max(maxU - minU, maxV - minV, 10);
++  const pad = span * 0.2;
++  const cx = (minU + maxU) * 0.5;
++  const cy = (minV + maxV) * 0.5;
++  const half = span * 0.5 + pad;
++  const vbMinU = cx - half;
++  const vbMaxU = cx + half;
++  const vbMinV = cy - half;
++  const vbMaxV = cy + half;
++  const width = vbMaxU - vbMinU;
++  const height = vbMaxV - vbMinV;
++
++  // Map engineering (u, +v up) -> SVG (u, -v down)
++  const toSvgY = (v: number) => -v;
++  const strokeUnit = width / 160;
++
++  return (
++    <div
++      className="overflow-hidden rounded-md border border-border/70 bg-muted/25 p-2"
++      data-cad-blueprint
++    >
++      <div className="mb-1 flex items-center justify-between font-mono text-3xs text-muted-foreground">
++        <span>
++          2D BLUEPRINT · {plane.toUpperCase()} ({uLabel}/{vLabel})
++        </span>
++        {dependentRevolve ? (
++          <span className="text-warning">
++            Revolve axis {dependentRevolve.axis.toUpperCase()}={dependentRevolve.axisOffset} mm (
++            {dependentRevolve.angleDeg}°)
++          </span>
++        ) : (
++          <span>Origin (0, 0)</span>
++        )}
++      </div>
++      <svg
++        viewBox={`${vbMinU} ${-vbMaxV} ${width} ${height}`}
++        className="h-32 w-full rounded bg-background/80"
++        role="img"
++        aria-label={`2D ${plane.toUpperCase()} sketch blueprint`}
++      >
++        {/* Origin crosshairs */}
++        <g className="text-muted-foreground/45">
++          <line
++            x1={vbMinU}
++            y1={0}
++            x2={vbMaxU}
++            y2={0}
++            stroke="currentColor"
++            strokeWidth={strokeUnit * 0.8}
++            strokeDasharray={`${strokeUnit * 3} ${strokeUnit * 3}`}
++          />
++          <line
++            x1={0}
++            y1={-vbMaxV}
++            x2={0}
++            y2={-vbMinV}
++            stroke="currentColor"
++            strokeWidth={strokeUnit * 0.8}
++            strokeDasharray={`${strokeUnit * 3} ${strokeUnit * 3}`}
++          />
++        </g>
++
++        {/* Revolve axis overlay */}
++        {dependentRevolve ? (
++          <g className="text-warning">
++            {dependentRevolve.axis === "v" ? (
++              <line
++                x1={dependentRevolve.axisOffset}
++                y1={-vbMaxV}
++                x2={dependentRevolve.axisOffset}
++                y2={-vbMinV}
++                stroke="currentColor"
++                strokeWidth={strokeUnit * 1.4}
++                strokeDasharray={`${strokeUnit * 4} ${strokeUnit * 2}`}
++              />
++            ) : (
++              <line
++                x1={vbMinU}
++                y1={toSvgY(dependentRevolve.axisOffset)}
++                x2={vbMaxU}
++                y2={toSvgY(dependentRevolve.axisOffset)}
++                stroke="currentColor"
++                strokeWidth={strokeUnit * 1.4}
++                strokeDasharray={`${strokeUnit * 4} ${strokeUnit * 2}`}
++              />
++            )}
++          </g>
++        ) : null}
++
++        {/* Shape geometry */}
++        {rectSpec ? (
++          <rect
++            x={rectSpec.x}
++            y={toSvgY(rectSpec.y + rectSpec.height)}
++            width={rectSpec.width}
++            height={rectSpec.height}
++            className="text-info"
++            fill="currentColor"
++            fillOpacity={0.2}
++            stroke="currentColor"
++            strokeWidth={strokeUnit * 1.5}
++          />
++        ) : null}
++
++        {circleSpec ? (
++          <circle
++            cx={circleSpec.cx}
++            cy={toSvgY(circleSpec.cy)}
++            r={circleSpec.radius}
++            className="text-success"
++            fill="currentColor"
++            fillOpacity={0.2}
++            stroke="currentColor"
++            strokeWidth={strokeUnit * 1.5}
++          />
++        ) : null}
++
++        {polyNodes ? (
++          <g className="text-info">
++            <polygon
++              points={polyNodes.map((node) => `${node.u},${toSvgY(node.v)}`).join(" ")}
++              fill="currentColor"
++              fillOpacity={0.2}
++              stroke="currentColor"
++              strokeWidth={strokeUnit * 1.5}
++            />
++            {polyNodes.map((node) => (
++              <g key={node.key} className="text-foreground">
++                <circle cx={node.u} cy={toSvgY(node.v)} r={strokeUnit * 2.2} fill="currentColor" />
++                <text
++                  x={node.u + strokeUnit * 2.6}
++                  y={toSvgY(node.v) - strokeUnit * 1.5}
++                  fontSize={strokeUnit * 7}
++                  fill="currentColor"
++                  fillOpacity={0.8}
++                  fontFamily="monospace"
++                >
++                  {node.label}
++                </text>
++              </g>
++            ))}
++          </g>
++        ) : null}
++      </svg>
++    </div>
++  );
++}
+diff --git a/apps/web/src/components/cad/CadWorkspacePanel.tsx b/apps/web/src/components/cad/CadWorkspacePanel.tsx
+index 85fc0434..ffaed48d 100644
+--- a/apps/web/src/components/cad/CadWorkspacePanel.tsx
++++ b/apps/web/src/components/cad/CadWorkspacePanel.tsx
+@@ -10,6 +10,7 @@ import {
+   type CadFeature,
+   type CadParameterName,
+   CadRequestId,
++  type CadRevolveAxis,
+   type CadSketchPlane,
+   type CadVec2,
+   type EnvironmentId,
+@@ -28,6 +29,7 @@ import {
+   LayersIcon,
+   PlusIcon,
+   RefreshCwIcon,
++  RotateCwIcon,
+   SquareIcon,
+   Trash2Icon,
+   Undo2Icon,
+@@ -40,6 +42,7 @@ import { cn } from "~/lib/utils";
+ import { cadEnvironment } from "~/state/cad";
+ import { useEnvironmentQuery } from "~/state/query";
+ import { useAtomCommand } from "~/state/use-atom-command";
++import { CadSketchBlueprint } from "./CadSketchBlueprint";
+ import { CadViewport3d } from "./CadViewport3d";
+ 
+ interface CadWorkspacePanelProps {
+@@ -60,10 +63,17 @@ const UI_ACTOR: CadActor = {
+   label: "CAD UI",
+ };
+ 
+-type CadSeedPreset = "mounting_plate" | "l_bracket" | "blank";
+-type NewFeatureShape = "box" | "cylinder" | "l_polygon" | "hole_cut";
++type CadSeedPreset = "mounting_plate" | "l_bracket" | "stepped_flange" | "blank";
++type NewFeatureShape = "box" | "cylinder" | "l_polygon" | "hole_cut" | "revolve";
++
++interface DraftPolygonPoint {
++  readonly key: string;
++  readonly u: string;
++  readonly v: string;
++}
+ 
+ let cadRequestSequence = 0;
++let cadVertexKeySequence = 0;
+ 
+ function makeRequestId(prefix: string): CadRequestId {
+   cadRequestSequence += 1;
+@@ -86,9 +96,7 @@ function formatFailureMessage(failure: unknown, fallback: string): string {
+   return fallback;
+ }
+ 
+-function featureParameters(
+-  feature: CadFeature,
+-): ReadonlyArray<{
++function featureParameters(feature: CadFeature): ReadonlyArray<{
+   readonly key: CadParameterName;
+   readonly label: string;
+   readonly value: number;
+@@ -114,6 +122,11 @@ function featureParameters(
+         { key: "depth", label: "Depth (mm)", value: feature.depth },
+         { key: "zOffset", label: "Normal Offset (mm)", value: feature.zOffset },
+       ];
++    case "revolve":
++      return [
++        { key: "angleDeg", label: "Sweep Angle (°)", value: feature.angleDeg },
++        { key: "axisOffset", label: "Axis Offset (mm)", value: feature.axisOffset },
++      ];
+   }
+ }
+ 
+@@ -137,8 +150,8 @@ function formatBoundsDimensions(snapshot: CadDocumentSnapshot): string {
+   return `${formatCompactDimension(dx)} × ${formatCompactDimension(dy)} × ${formatCompactDimension(dz)} mm`;
+ }
+ 
+-function triggerStlDownload(filename: string, stlAscii: string) {
+-  const blob = new Blob([stlAscii], { type: "model/stl" });
++function triggerTextDownload(filename: string, content: string, mimeType: string) {
++  const blob = new Blob([content], { type: mimeType });
+   const url = URL.createObjectURL(blob);
+   const link = document.createElement("a");
+   link.href = url;
+@@ -178,6 +191,9 @@ export function CadWorkspacePanel(props: CadWorkspacePanelProps) {
+   const [newOriginU, setNewOriginU] = useState("10");
+   const [newOriginV, setNewOriginV] = useState("10");
+   const [newNormalOffset, setNewNormalOffset] = useState("8");
++  const [newRevolveAxis, setNewRevolveAxis] = useState<CadRevolveAxis>("v");
++  const [newAxisOffset, setNewAxisOffset] = useState("0");
++  const [newAngleDeg, setNewAngleDeg] = useState("360");
+ 
+   const [busyAction, setBusyAction] = useState<string | null>(null);
+   const [statusNotice, setStatusNotice] = useState<{
+@@ -188,6 +204,7 @@ export function CadWorkspacePanel(props: CadWorkspacePanelProps) {
+     readonly scopeKey: string;
+     readonly values: Readonly<Record<string, string>>;
+     readonly name: string;
++    readonly points?: ReadonlyArray<DraftPolygonPoint>;
+   } | null>(null);
+ 
+   const createDocumentCmd = useAtomCommand(cadEnvironment.createDocument, { reportFailure: false });
+@@ -196,6 +213,7 @@ export function CadWorkspacePanel(props: CadWorkspacePanelProps) {
+     reportFailure: false,
+   });
+   const exportStlCmd = useAtomCommand(cadEnvironment.exportStl, { reportFailure: false });
++  const exportObjCmd = useAtomCommand(cadEnvironment.exportObj, { reportFailure: false });
+ 
+   const listQuery = useEnvironmentQuery(
+     props.projectId === null
+@@ -268,7 +286,9 @@ export function CadWorkspacePanel(props: CadWorkspacePanelProps) {
+     snapshot === null
+       ? null
+       : (snapshot.features.find((feature) => feature.id === selectedFeatureId) ??
+-        snapshot.features.find((feature) => feature.kind === "extrusion") ??
++        snapshot.features.find(
++          (feature) => feature.kind === "extrusion" || feature.kind === "revolve",
++        ) ??
+         snapshot.features[0] ??
+         null);
+ 
+@@ -278,6 +298,23 @@ export function CadWorkspacePanel(props: CadWorkspacePanelProps) {
+       : "";
+   const activeDraft =
+     draftEdits !== null && draftEdits.scopeKey === editScopeKey ? draftEdits : null;
++  const displayedPolygonPoints: ReadonlyArray<DraftPolygonPoint> | null =
++    activeFeature?.kind === "polygon"
++      ? (activeDraft?.points ??
++        (() => {
++          const rows: Array<DraftPolygonPoint> = [];
++          let slot = 0;
++          for (const [u, v] of activeFeature.points) {
++            rows.push({
++              key: `${editScopeKey}:v:${slot}`,
++              u: String(u),
++              v: String(v),
++            });
++            slot += 1;
++          }
++          return rows;
++        })())
++      : null;
+ 
+   const handleCreateDocument = async (
+     documentIdRaw: string,
+@@ -390,23 +427,59 @@ export function CadWorkspacePanel(props: CadWorkspacePanelProps) {
+   const handleApplyFeatureEdits = async () => {
+     if (snapshot === null || activeFeature === null) return;
+     const commands: CadCommand[] = [];
+-    const params = featureParameters(activeFeature);
+-    for (const param of params) {
+-      const raw = activeDraft?.values[param.key];
+-      if (raw === undefined) continue;
+-      const numeric = Number(raw);
+-      if (raw.trim() === "" || !Number.isFinite(numeric)) {
+-        setStatusNotice({ type: "error", text: `${param.label} must be a valid number.` });
+-        return;
++    if (activeFeature.kind === "polygon" && activeDraft?.points !== undefined) {
++      const parsedPoints: Array<CadVec2> = [];
++      for (let idx = 0; idx < activeDraft.points.length; idx++) {
++        const pt = activeDraft.points[idx]!;
++        const u = Number(pt.u);
++        const v = Number(pt.v);
++        if (
++          pt.u.trim() === "" ||
++          pt.v.trim() === "" ||
++          !Number.isFinite(u) ||
++          !Number.isFinite(v)
++        ) {
++          setStatusNotice({
++            type: "error",
++            text: `Vertex #${idx} coordinates must be valid numbers.`,
++          });
++          return;
++        }
++        parsedPoints.push([u, v]);
+       }
+-      if (Math.abs(numeric - param.value) > 1e-9) {
++      const changed =
++        parsedPoints.length !== activeFeature.points.length ||
++        parsedPoints.some(
++          ([u, v], idx) =>
++            Math.abs(u - activeFeature.points[idx]![0]) > 1e-9 ||
++            Math.abs(v - activeFeature.points[idx]![1]) > 1e-9,
++        );
++      if (changed) {
+         commands.push({
+-          op: "feature.set_parameter",
++          op: "sketch.set_polygon_points",
+           featureId: activeFeature.id,
+-          parameter: param.key,
+-          value: numeric,
++          points: parsedPoints,
+         });
+       }
++    } else {
++      const params = featureParameters(activeFeature);
++      for (const param of params) {
++        const raw = activeDraft?.values[param.key];
++        if (raw === undefined) continue;
++        const numeric = Number(raw);
++        if (raw.trim() === "" || !Number.isFinite(numeric)) {
++          setStatusNotice({ type: "error", text: `${param.label} must be a valid number.` });
++          return;
++        }
++        if (Math.abs(numeric - param.value) > 1e-9) {
++          commands.push({
++            op: "feature.set_parameter",
++            featureId: activeFeature.id,
++            parameter: param.key,
++            value: numeric,
++          });
++        }
++      }
+     }
+     const nextName = activeDraft?.name.trim();
+     const currentName = activeFeature.name ?? activeFeature.id;
+@@ -451,13 +524,40 @@ export function CadWorkspacePanel(props: CadWorkspacePanelProps) {
+       });
+       return;
+     }
+-    triggerStlDownload(result.value.filename, result.value.stlAscii);
++    triggerTextDownload(result.value.filename, result.value.stlAscii, "model/stl");
+     setStatusNotice({
+       type: "ok",
+       text: `Exported ${result.value.writtenPath ?? result.value.filename} (${result.value.triangleCount} triangles).`,
+     });
+   };
+ 
++  const handleExportObj = async () => {
++    if (snapshot === null) return;
++    setBusyAction("export_obj");
++    setStatusNotice(null);
++    const result = await exportObjCmd({
++      environmentId: props.environmentId,
++      input: {
++        projectId,
++        documentId: snapshot.documentId,
++        relativePath: `exports/${snapshot.documentId}.obj`,
++      },
++    });
++    setBusyAction(null);
++    if (result._tag === "Failure") {
++      setStatusNotice({
++        type: "error",
++        text: formatFailureMessage(squashAtomCommandFailure(result), "OBJ export failed."),
++      });
++      return;
++    }
++    triggerTextDownload(result.value.filename, result.value.objText, "text/plain");
++    setStatusNotice({
++      type: "ok",
++      text: `Exported ${result.value.writtenPath ?? result.value.filename} (${result.value.vertexCount} vertices, ${result.value.triangleCount} faces).`,
++    });
++  };
++
+   const handleAddSampleCutHole = async () => {
+     if (snapshot === null) return;
+     const suffix = nextFeatureSuffix(snapshot.features, "hole_sketch", "hole_cut");
+@@ -508,6 +608,8 @@ export function CadWorkspacePanel(props: CadWorkspacePanelProps) {
+     const u0 = Number(newOriginU);
+     const v0 = Number(newOriginV);
+     const zOffset = Number(newNormalOffset);
++    const axisOffset = Number(newAxisOffset);
++    const angleDeg = Number(newAngleDeg);
+ 
+     if (!Number.isFinite(valA) || valA <= 0) {
+       setStatusNotice({
+@@ -519,22 +621,39 @@ export function CadWorkspacePanel(props: CadWorkspacePanelProps) {
+       });
+       return;
+     }
+-    if ((newShape === "box" || newShape === "l_polygon") && (!Number.isFinite(valB) || valB <= 0)) {
++    if (
++      (newShape === "box" || newShape === "l_polygon" || newShape === "revolve") &&
++      (!Number.isFinite(valB) || valB <= 0)
++    ) {
+       setStatusNotice({ type: "error", text: "Height must be > 0." });
+       return;
+     }
+-    if (!Number.isFinite(depth) || depth <= 0) {
++    if (newShape !== "revolve" && (!Number.isFinite(depth) || depth <= 0)) {
+       setStatusNotice({ type: "error", text: "Depth must be > 0." });
+       return;
+     }
++    if (newShape === "revolve") {
++      if (!Number.isFinite(axisOffset)) {
++        setStatusNotice({ type: "error", text: "Axis offset must be a valid number." });
++        return;
++      }
++      if (!Number.isFinite(angleDeg) || angleDeg <= 0 || angleDeg > 360) {
++        setStatusNotice({ type: "error", text: "Sweep angle must be in (0, 360]." });
++        return;
++      }
++    }
+     if (!Number.isFinite(u0) || !Number.isFinite(v0) || !Number.isFinite(zOffset)) {
+       setStatusNotice({ type: "error", text: "Offsets must be valid numbers." });
+       return;
+     }
+ 
+-    const suffix = nextFeatureSuffix(snapshot.features, "sketch", "ext");
++    const suffix = nextFeatureSuffix(
++      snapshot.features,
++      "sketch",
++      newShape === "revolve" ? "rev" : "ext",
++    );
+     const sketchId = CadFeatureId.make(`sketch_${suffix}`);
+-    const extrudeId = CadFeatureId.make(`ext_${suffix}`);
++    const solidId = CadFeatureId.make(`${newShape === "revolve" ? "rev" : "ext"}_${suffix}`);
+     const effectiveOp: CadExtrusionOperation =
+       snapshot.report.bodies.length === 0 && newOperation !== "new_body"
+         ? "new_body"
+@@ -572,7 +691,7 @@ export function CadWorkspacePanel(props: CadWorkspacePanelProps) {
+       sketchCommand = {
+         op: "sketch.create_rectangle",
+         featureId: sketchId,
+-        name: `Rect Sketch ${suffix}`,
++        name: `${newShape === "revolve" ? "Revolve Profile" : "Rect Sketch"} ${suffix}`,
+         plane: newPlane,
+         x: u0,
+         y: v0,
+@@ -581,23 +700,35 @@ export function CadWorkspacePanel(props: CadWorkspacePanelProps) {
+       };
+     }
+ 
+-    const extrudeCommand: CadCommand = {
+-      op: "feature.extrude",
+-      featureId: extrudeId,
+-      name: `${newShape.replace("_", " ")} (${effectiveOp}) ${suffix}`,
+-      profileId: sketchId,
+-      depth,
+-      zOffset,
+-      operation: effectiveOp,
+-    };
++    const solidCommand: CadCommand =
++      newShape === "revolve"
++        ? {
++            op: "feature.revolve",
++            featureId: solidId,
++            name: `Revolve (${effectiveOp}) ${suffix}`,
++            profileId: sketchId,
++            axis: newRevolveAxis,
++            axisOffset,
++            angleDeg,
++            operation: effectiveOp,
++          }
++        : {
++            op: "feature.extrude",
++            featureId: solidId,
++            name: `${newShape.replace("_", " ")} (${effectiveOp}) ${suffix}`,
++            profileId: sketchId,
++            depth,
++            zOffset,
++            operation: effectiveOp,
++          };
+ 
+     const ok = await runBatchCommands(
+-      [sketchCommand, extrudeCommand],
++      [sketchCommand, solidCommand],
+       `Added ${newShape} (${effectiveOp}) on ${newPlane.toUpperCase()} plane.`,
+     );
+     if (ok) {
+       setShowAddFeature(false);
+-      setSelectedFeatureId(sketchId);
++      setSelectedFeatureId(newShape === "revolve" ? solidId : sketchId);
+     }
+   };
+ 
+@@ -606,6 +737,21 @@ export function CadWorkspacePanel(props: CadWorkspacePanelProps) {
+     activeFeature !== null &&
+     ((activeDraft.name.trim().length > 0 &&
+       activeDraft.name.trim() !== (activeFeature.name ?? activeFeature.id)) ||
++      (activeFeature.kind === "polygon" &&
++        activeDraft.points !== undefined &&
++        (activeDraft.points.length !== activeFeature.points.length ||
++          activeDraft.points.some((pt, idx) => {
++            const u = Number(pt.u);
++            const v = Number(pt.v);
++            return (
++              pt.u.trim() === "" ||
++              pt.v.trim() === "" ||
++              !Number.isFinite(u) ||
++              !Number.isFinite(v) ||
++              Math.abs(u - activeFeature.points[idx]![0]) > 1e-9 ||
++              Math.abs(v - activeFeature.points[idx]![1]) > 1e-9
++            );
++          }))) ||
+       featureParameters(activeFeature).some((param) => {
+         const raw = activeDraft.values[param.key];
+         if (raw === undefined) return false;
+@@ -673,15 +819,26 @@ export function CadWorkspacePanel(props: CadWorkspacePanelProps) {
+             New Part
+           </Button>
+           {snapshot !== null ? (
+-            <Button
+-              size="xs"
+-              variant="secondary"
+-              disabled={busyAction !== null || snapshot.report.bodies.length === 0}
+-              onClick={() => void handleExportStl()}
+-            >
+-              <DownloadIcon className="size-3.5" />
+-              Export STL
+-            </Button>
++            <>
++              <Button
++                size="xs"
++                variant="secondary"
++                disabled={busyAction !== null || snapshot.report.bodies.length === 0}
++                onClick={() => void handleExportStl()}
++              >
++                <DownloadIcon className="size-3.5" />
++                Export STL
++              </Button>
++              <Button
++                size="xs"
++                variant="outline"
++                disabled={busyAction !== null || snapshot.report.bodies.length === 0}
++                onClick={() => void handleExportObj()}
++              >
++                <DownloadIcon className="size-3.5" />
++                Export OBJ
++              </Button>
++            </>
+           ) : null}
+         </div>
+       </div>
+@@ -713,12 +870,15 @@ export function CadWorkspacePanel(props: CadWorkspacePanelProps) {
+               onChange={(event) => {
+                 const value = event.target.value;
+                 setNewDocPreset(
+-                  value === "blank" || value === "l_bracket" ? value : "mounting_plate",
++                  value === "blank" || value === "l_bracket" || value === "stepped_flange"
++                    ? value
++                    : "mounting_plate",
+                 );
+               }}
+             >
+               <option value="mounting_plate">Mounting Plate (100×60×8 mm)</option>
+               <option value="l_bracket">3D L-Bracket (XY + XZ Union)</option>
++              <option value="stepped_flange">Turned Stepped Flange (XZ Revolve)</option>
+               <option value="blank">Blank Part</option>
+             </select>
+           </label>
+@@ -758,8 +918,8 @@ export function CadWorkspacePanel(props: CadWorkspacePanelProps) {
+           <div className="space-y-1">
+             <h3 className="font-medium text-sm text-foreground">No CAD document open</h3>
+             <p className="max-w-xs text-xs text-muted-foreground">
+-              Seed a parametric mounting plate or 3D L-bracket, or ask the agent to model solid
+-              geometry with{" "}
++              Seed a mounting plate, 3D L-bracket, or revolved flange, or ask the agent to model
++              solid geometry with{" "}
+               <code className="rounded bg-muted px-1 py-0.5 font-mono text-2xs">
+                 cad_create_document
+               </code>
+@@ -786,6 +946,17 @@ export function CadWorkspacePanel(props: CadWorkspacePanelProps) {
+               <PlusIcon className="size-3.5" />
+               Seed 3D L-Bracket
+             </Button>
++            <Button
++              size="sm"
++              variant="secondary"
++              disabled={busyAction !== null}
++              onClick={() =>
++                void handleCreateDocument("stepped_flange", "Stepped Flange", "stepped_flange")
++              }
++            >
++              <RotateCwIcon className="size-3.5" />
++              Seed Turned Flange
++            </Button>
+             <Button
+               size="sm"
+               variant="outline"
+@@ -901,6 +1072,18 @@ export function CadWorkspacePanel(props: CadWorkspacePanelProps) {
+                             setNewOperation("cut");
+                             setNewWidthOrRadius("3.5");
+                             setNewNormalOffset("0");
++                          } else if (shape === "revolve") {
++                            setNewPlane("xz");
++                            setNewOriginU("14");
++                            setNewOriginV("0");
++                            setNewWidthOrRadius("10");
++                            setNewHeight("18");
++                            setNewRevolveAxis("v");
++                            setNewAxisOffset("0");
++                            setNewAngleDeg("360");
++                            setNewOperation(
++                              snapshot.report.bodies.length > 0 ? "union" : "new_body",
++                            );
+                           } else {
+                             setNewOperation(
+                               snapshot.report.bodies.length > 0 ? "union" : "new_body",
+@@ -912,6 +1095,7 @@ export function CadWorkspacePanel(props: CadWorkspacePanelProps) {
+                         <option value="cylinder">Cylinder</option>
+                         <option value="l_polygon">L-Polygon</option>
+                         <option value="hole_cut">Hole Cut</option>
++                        <option value="revolve">Revolve</option>
+                       </select>
+                     </label>
+                     <label className="flex flex-col gap-0.5">
+@@ -960,7 +1144,7 @@ export function CadWorkspacePanel(props: CadWorkspacePanelProps) {
+                         onChange={(event) => setNewWidthOrRadius(event.target.value)}
+                       />
+                     </label>
+-                    {newShape === "box" || newShape === "l_polygon" ? (
++                    {newShape === "box" || newShape === "l_polygon" || newShape === "revolve" ? (
+                       <label className="flex flex-col gap-0.5">
+                         <span className="text-3xs text-muted-foreground">Height (mm)</span>
+                         <input
+@@ -973,17 +1157,71 @@ export function CadWorkspacePanel(props: CadWorkspacePanelProps) {
+                         />
+                       </label>
+                     ) : null}
+-                    <label className="flex flex-col gap-0.5">
+-                      <span className="text-3xs text-muted-foreground">Depth (mm)</span>
+-                      <input
+-                        type="number"
+-                        step="any"
+-                        aria-label="New feature depth"
+-                        className="h-6 rounded border border-input bg-background px-1.5 font-mono text-2xs"
+-                        value={newDepth}
+-                        onChange={(event) => setNewDepth(event.target.value)}
+-                      />
+-                    </label>
++                    {newShape === "revolve" ? (
++                      <>
++                        <label className="flex flex-col gap-0.5">
++                          <span className="text-3xs text-muted-foreground">Axis</span>
++                          <select
++                            aria-label="New feature revolve axis"
++                            className="h-6 rounded border border-input bg-background px-1.5 text-2xs"
++                            value={newRevolveAxis}
++                            onChange={(event) =>
++                              setNewRevolveAxis(event.target.value as CadRevolveAxis)
++                            }
++                          >
++                            <option value="v">V Axis</option>
++                            <option value="u">U Axis</option>
++                          </select>
++                        </label>
++                        <label className="flex flex-col gap-0.5">
++                          <span className="text-3xs text-muted-foreground">Axis Offset (mm)</span>
++                          <input
++                            type="number"
++                            step="any"
++                            aria-label="New feature axis offset"
++                            className="h-6 rounded border border-input bg-background px-1.5 font-mono text-2xs"
++                            value={newAxisOffset}
++                            onChange={(event) => setNewAxisOffset(event.target.value)}
++                          />
++                        </label>
++                        <label className="flex flex-col gap-0.5">
++                          <span className="text-3xs text-muted-foreground">Angle (°)</span>
++                          <input
++                            type="number"
++                            step="any"
++                            aria-label="New feature angle"
++                            className="h-6 rounded border border-input bg-background px-1.5 font-mono text-2xs"
++                            value={newAngleDeg}
++                            onChange={(event) => setNewAngleDeg(event.target.value)}
++                          />
++                        </label>
++                      </>
++                    ) : (
++                      <>
++                        <label className="flex flex-col gap-0.5">
++                          <span className="text-3xs text-muted-foreground">Depth (mm)</span>
++                          <input
++                            type="number"
++                            step="any"
++                            aria-label="New feature depth"
++                            className="h-6 rounded border border-input bg-background px-1.5 font-mono text-2xs"
++                            value={newDepth}
++                            onChange={(event) => setNewDepth(event.target.value)}
++                          />
++                        </label>
++                        <label className="flex flex-col gap-0.5">
++                          <span className="text-3xs text-muted-foreground">Offset W (mm)</span>
++                          <input
++                            type="number"
++                            step="any"
++                            aria-label="New feature W offset"
++                            className="h-6 rounded border border-input bg-background px-1.5 font-mono text-2xs"
++                            value={newNormalOffset}
++                            onChange={(event) => setNewNormalOffset(event.target.value)}
++                          />
++                        </label>
++                      </>
++                    )}
+                     <label className="flex flex-col gap-0.5">
+                       <span className="text-3xs text-muted-foreground">Origin U (mm)</span>
+                       <input
+@@ -1006,17 +1244,6 @@ export function CadWorkspacePanel(props: CadWorkspacePanelProps) {
+                         onChange={(event) => setNewOriginV(event.target.value)}
+                       />
+                     </label>
+-                    <label className="flex flex-col gap-0.5">
+-                      <span className="text-3xs text-muted-foreground">Offset W (mm)</span>
+-                      <input
+-                        type="number"
+-                        step="any"
+-                        aria-label="New feature W offset"
+-                        className="h-6 rounded border border-input bg-background px-1.5 font-mono text-2xs"
+-                        value={newNormalOffset}
+-                        onChange={(event) => setNewNormalOffset(event.target.value)}
+-                      />
+-                    </label>
+                   </div>
+                   <div className="flex justify-end gap-1.5">
+                     <Button size="micro" variant="ghost" onClick={() => setShowAddFeature(false)}>
+@@ -1053,6 +1280,8 @@ export function CadWorkspacePanel(props: CadWorkspacePanelProps) {
+                           <CircleIcon className="size-3 shrink-0 text-success" />
+                         ) : feature.kind === "polygon" ? (
+                           <HexagonIcon className="size-3 shrink-0 text-accent-foreground" />
++                        ) : feature.kind === "revolve" ? (
++                          <RotateCwIcon className="size-3 shrink-0 text-info" />
+                         ) : (
+                           <LayersIcon className="size-3 shrink-0 text-warning" />
+                         )}
+@@ -1061,7 +1290,9 @@ export function CadWorkspacePanel(props: CadWorkspacePanelProps) {
+                       <span className="shrink-0 font-mono text-3xs text-muted-foreground">
+                         {feature.kind === "extrusion"
+                           ? feature.operation
+-                          : `${feature.kind}${feature.plane && feature.plane !== "xy" ? `:${feature.plane}` : ""}`}
++                          : feature.kind === "revolve"
++                            ? `rev ${feature.angleDeg}°·${feature.operation}`
++                            : `${feature.kind}${feature.plane && feature.plane !== "xy" ? `:${feature.plane}` : ""}`}
+                       </span>
+                     </button>
+                   );
+@@ -1089,7 +1320,7 @@ export function CadWorkspacePanel(props: CadWorkspacePanelProps) {
+ 
+               {activeFeature === null ? (
+                 <div className="p-3 text-xs text-muted-foreground">
+-                  Select a sketch or extrusion feature to inspect and edit parameters.
++                  Select a sketch or solid feature to inspect and edit parameters.
+                 </div>
+               ) : (
+                 <div className="space-y-2 p-2.5 text-xs">
+@@ -1104,6 +1335,9 @@ export function CadWorkspacePanel(props: CadWorkspacePanelProps) {
+                           scopeKey: editScopeKey,
+                           name: event.target.value,
+                           values: activeDraft?.values ?? {},
++                          ...(activeDraft?.points !== undefined
++                            ? { points: activeDraft.points }
++                            : {}),
+                         })
+                       }
+                       onKeyDown={(event) => {
+@@ -1111,14 +1345,138 @@ export function CadWorkspacePanel(props: CadWorkspacePanelProps) {
+                       }}
+                     />
+                   </label>
+-                  {activeFeature.kind === "polygon" ? (
+-                    <div className="rounded-md border border-border/70 bg-muted/30 p-2 font-mono text-2xs text-muted-foreground">
+-                      <div>
+-                        Plane {(activeFeature.plane ?? "xy").toUpperCase()} ·{" "}
+-                        {activeFeature.points.length} vertices
++                  {activeFeature.kind === "rectangle" ||
++                  activeFeature.kind === "circle" ||
++                  activeFeature.kind === "polygon" ? (
++                    <CadSketchBlueprint
++                      sketch={activeFeature}
++                      {...(activeDraft?.values !== undefined
++                        ? { draftValues: activeDraft.values }
++                        : {})}
++                      {...(displayedPolygonPoints !== null
++                        ? {
++                            draftPoints: displayedPolygonPoints.map((pt) => [pt.u, pt.v] as const),
++                          }
++                        : {})}
++                      dependentRevolve={snapshot.features.find(
++                        (f): f is Extract<CadFeature, { kind: "revolve" }> =>
++                          f.kind === "revolve" && f.profileId === activeFeature.id,
++                      )}
++                    />
++                  ) : null}
++                  {activeFeature.kind === "polygon" && displayedPolygonPoints !== null ? (
++                    <div className="space-y-1.5">
++                      <div className="flex items-center justify-between text-2xs text-muted-foreground">
++                        <span>Polygon Vertices ({displayedPolygonPoints.length})</span>
++                        <Button
++                          size="micro"
++                          variant="ghost"
++                          onClick={() => {
++                            const last = displayedPolygonPoints[
++                              displayedPolygonPoints.length - 1
++                            ] ?? { key: "", u: "0", v: "0" };
++                            const first = displayedPolygonPoints[0] ?? {
++                              key: "",
++                              u: "0",
++                              v: "0",
++                            };
++                            const midU = ((Number(last.u) + Number(first.u)) * 0.5).toFixed(2);
++                            const midV = ((Number(last.v) + Number(first.v)) * 0.5).toFixed(2);
++                            cadVertexKeySequence += 1;
++                            setDraftEdits({
++                              scopeKey: editScopeKey,
++                              name: activeDraft?.name ?? activeFeature.name ?? activeFeature.id,
++                              values: activeDraft?.values ?? {},
++                              points: [
++                                ...displayedPolygonPoints,
++                                {
++                                  key: `${editScopeKey}:new:${cadVertexKeySequence}`,
++                                  u: midU,
++                                  v: midV,
++                                },
++                              ],
++                            });
++                          }}
++                        >
++                          <PlusIcon className="size-3" />
++                          Vertex
++                        </Button>
+                       </div>
+-                      <div className="mt-1 truncate">
+-                        {activeFeature.points.map(([px, py]) => `(${px}, ${py})`).join(" → ")}
++                      <div className="max-h-36 space-y-1 overflow-y-auto pr-0.5">
++                        {displayedPolygonPoints.map((pt, idx) => (
++                          <div key={pt.key} className="flex items-center gap-1">
++                            <span className="w-6 shrink-0 font-mono text-3xs text-muted-foreground">
++                              #{idx}
++                            </span>
++                            <input
++                              type="number"
++                              step="any"
++                              aria-label={`Vertex ${idx} U`}
++                              className="h-6 min-w-0 flex-1 rounded border border-input bg-background px-1.5 font-mono text-2xs"
++                              value={pt.u}
++                              onChange={(event) => {
++                                const nextPts = displayedPolygonPoints.map((candidate) =>
++                                  candidate.key === pt.key
++                                    ? { ...candidate, u: event.target.value }
++                                    : candidate,
++                                );
++                                setDraftEdits({
++                                  scopeKey: editScopeKey,
++                                  name: activeDraft?.name ?? activeFeature.name ?? activeFeature.id,
++                                  values: activeDraft?.values ?? {},
++                                  points: nextPts,
++                                });
++                              }}
++                              onKeyDown={(event) => {
++                                if (event.key === "Enter") void handleApplyFeatureEdits();
++                              }}
++                            />
++                            <input
++                              type="number"
++                              step="any"
++                              aria-label={`Vertex ${idx} V`}
++                              className="h-6 min-w-0 flex-1 rounded border border-input bg-background px-1.5 font-mono text-2xs"
++                              value={pt.v}
++                              onChange={(event) => {
++                                const nextPts = displayedPolygonPoints.map((candidate) =>
++                                  candidate.key === pt.key
++                                    ? { ...candidate, v: event.target.value }
++                                    : candidate,
++                                );
++                                setDraftEdits({
++                                  scopeKey: editScopeKey,
++                                  name: activeDraft?.name ?? activeFeature.name ?? activeFeature.id,
++                                  values: activeDraft?.values ?? {},
++                                  points: nextPts,
++                                });
++                              }}
++                              onKeyDown={(event) => {
++                                if (event.key === "Enter") void handleApplyFeatureEdits();
++                              }}
++                            />
++                            {displayedPolygonPoints.length > 3 ? (
++                              <Button
++                                size="icon-tiny"
++                                variant="ghost-destructive"
++                                title={`Remove vertex #${idx}`}
++                                onClick={() => {
++                                  const nextPts = displayedPolygonPoints.filter(
++                                    (candidate) => candidate.key !== pt.key,
++                                  );
++                                  setDraftEdits({
++                                    scopeKey: editScopeKey,
++                                    name:
++                                      activeDraft?.name ?? activeFeature.name ?? activeFeature.id,
++                                    values: activeDraft?.values ?? {},
++                                    points: nextPts,
++                                  });
++                                }}
++                              >
++                                <Trash2Icon className="size-3" />
++                              </Button>
++                            ) : null}
++                          </div>
++                        ))}
+                       </div>
+                     </div>
+                   ) : (
+diff --git a/apps/web/src/state/cad.ts b/apps/web/src/state/cad.ts
+index 51fd705b..82b716f5 100644
+--- a/apps/web/src/state/cad.ts
++++ b/apps/web/src/state/cad.ts
+@@ -71,4 +71,10 @@ export const cadEnvironment = {
+     scheduler: cadMutationScheduler,
+     concurrency: cadDocumentConcurrency,
+   }),
++  exportObj: createEnvironmentRpcCommand(connectionAtomRuntime, {
++    label: "environment-data:cad:export-obj",
++    tag: WS_METHODS.cadExportObj,
++    scheduler: cadMutationScheduler,
++    concurrency: cadDocumentConcurrency,
++  }),
+ };
+diff --git a/packages/contracts/src/cad.ts b/packages/contracts/src/cad.ts
+index 6570b3b0..020e89e4 100644
+--- a/packages/contracts/src/cad.ts
++++ b/packages/contracts/src/cad.ts
+@@ -84,6 +84,15 @@ export type CadSketchPolygonFeature = typeof CadSketchPolygonFeature.Type;
+ export const CadExtrusionOperation = Schema.Literals(["new_body", "union", "cut", "intersect"]);
+ export type CadExtrusionOperation = typeof CadExtrusionOperation.Type;
+ 
++export const CadRevolveAxis = Schema.Literals(["u", "v"]);
++export type CadRevolveAxis = typeof CadRevolveAxis.Type;
++
++export const CadAngleDeg = Schema.Finite.check(
++  Schema.isGreaterThan(0),
++  Schema.isLessThanOrEqualTo(360),
++);
++export type CadAngleDeg = typeof CadAngleDeg.Type;
++
+ export const CadExtrusionFeature = Schema.Struct({
+   id: CadFeatureId,
+   kind: Schema.Literal("extrusion"),
+@@ -96,11 +105,25 @@ export const CadExtrusionFeature = Schema.Struct({
+ });
+ export type CadExtrusionFeature = typeof CadExtrusionFeature.Type;
+ 
++export const CadRevolveFeature = Schema.Struct({
++  id: CadFeatureId,
++  kind: Schema.Literal("revolve"),
++  name: Schema.optionalKey(CadFeatureName),
++  profileId: CadFeatureId,
++  axis: CadRevolveAxis,
++  axisOffset: CadCoordMm,
++  angleDeg: CadAngleDeg,
++  operation: CadExtrusionOperation,
++  targetBodyId: Schema.optionalKey(CadFeatureId),
++});
++export type CadRevolveFeature = typeof CadRevolveFeature.Type;
++
+ export const CadFeature = Schema.Union([
+   CadSketchRectangleFeature,
+   CadSketchCircleFeature,
+   CadSketchPolygonFeature,
+   CadExtrusionFeature,
++  CadRevolveFeature,
+ ]);
+ export type CadFeature = typeof CadFeature.Type;
+ 
+@@ -114,6 +137,8 @@ export const CadParameterName = Schema.Literals([
+   "radius",
+   "depth",
+   "zOffset",
++  "axisOffset",
++  "angleDeg",
+ ]);
+ export type CadParameterName = typeof CadParameterName.Type;
+ 
+@@ -146,6 +171,12 @@ export const CadCreatePolygonCommand = Schema.Struct({
+   points: Schema.Array(CadVec2).check(Schema.isMinLength(3), Schema.isMaxLength(256)),
+ });
+ 
++export const CadSetPolygonPointsCommand = Schema.Struct({
++  op: Schema.Literal("sketch.set_polygon_points"),
++  featureId: CadFeatureId,
++  points: Schema.Array(CadVec2).check(Schema.isMinLength(3), Schema.isMaxLength(256)),
++});
++
+ export const CadExtrudeCommand = Schema.Struct({
+   op: Schema.Literal("feature.extrude"),
+   featureId: CadFeatureId,
+@@ -157,6 +188,18 @@ export const CadExtrudeCommand = Schema.Struct({
+   targetBodyId: Schema.optionalKey(CadFeatureId),
+ });
+ 
++export const CadRevolveCommand = Schema.Struct({
++  op: Schema.Literal("feature.revolve"),
++  featureId: CadFeatureId,
++  name: Schema.optionalKey(CadFeatureName),
++  profileId: CadFeatureId,
++  axis: Schema.optionalKey(CadRevolveAxis),
++  axisOffset: Schema.optionalKey(CadCoordMm),
++  angleDeg: Schema.optionalKey(CadAngleDeg),
++  operation: Schema.optionalKey(CadExtrusionOperation),
++  targetBodyId: Schema.optionalKey(CadFeatureId),
++});
++
+ export const CadSetParameterCommand = Schema.Struct({
+   op: Schema.Literal("feature.set_parameter"),
+   featureId: CadFeatureId,
+@@ -181,7 +224,9 @@ export const CadCommand = Schema.Union([
+   CadCreateRectangleCommand,
+   CadCreateCircleCommand,
+   CadCreatePolygonCommand,
++  CadSetPolygonPointsCommand,
+   CadExtrudeCommand,
++  CadRevolveCommand,
+   CadSetParameterCommand,
+   CadRenameFeatureCommand,
+   CadDeleteFeatureCommand,
+@@ -278,6 +323,7 @@ export const CadCapabilities = Schema.Struct({
+   featureKinds: Schema.Array(Schema.String),
+   sketchPlanes: Schema.optionalKey(Schema.Array(CadSketchPlane)),
+   extrusionOperations: Schema.optionalKey(Schema.Array(CadExtrusionOperation)),
++  revolveAxes: Schema.optionalKey(Schema.Array(CadRevolveAxis)),
+   presets: Schema.optionalKey(Schema.Array(Schema.String)),
+   atomicBatches: Schema.Boolean,
+   optimisticConcurrency: Schema.Boolean,
+@@ -285,6 +331,7 @@ export const CadCapabilities = Schema.Struct({
+   revisionRestore: Schema.optionalKey(Schema.Boolean),
+   solidModeling: Schema.Boolean,
+   stlExport: Schema.Boolean,
++  objExport: Schema.optionalKey(Schema.Boolean),
+ });
+ export type CadCapabilities = typeof CadCapabilities.Type;
+ 
+@@ -303,7 +350,9 @@ export const CadCreateDocumentInput = Schema.Struct({
+   projectId: ProjectId,
+   documentId: CadDocumentId,
+   name: Schema.optionalKey(CadFeatureName),
+-  preset: Schema.optionalKey(Schema.Literals(["blank", "mounting_plate", "l_bracket"])),
++  preset: Schema.optionalKey(
++    Schema.Literals(["blank", "mounting_plate", "l_bracket", "stepped_flange"]),
++  ),
+   actor: Schema.optionalKey(CadActor),
+ });
+ export type CadCreateDocumentInput = typeof CadCreateDocumentInput.Type;
+@@ -364,6 +413,25 @@ export const CadExportStlResult = Schema.Struct({
+ });
+ export type CadExportStlResult = typeof CadExportStlResult.Type;
+ 
++export const CadExportObjInput = Schema.Struct({
++  projectId: ProjectId,
++  documentId: CadDocumentId,
++  relativePath: Schema.optionalKey(TrimmedNonEmptyString.check(Schema.isMaxLength(200))),
++});
++export type CadExportObjInput = typeof CadExportObjInput.Type;
++
++export const CadExportObjResult = Schema.Struct({
++  documentId: CadDocumentId,
++  revision: NonNegativeInt,
++  filename: Schema.String,
++  writtenPath: Schema.NullOr(Schema.String),
++  vertexCount: NonNegativeInt,
++  triangleCount: NonNegativeInt,
++  byteLength: NonNegativeInt,
++  objText: Schema.String,
++});
++export type CadExportObjResult = typeof CadExportObjResult.Type;
++
+ export const CadSubscribeDocumentInput = Schema.Struct({
+   projectId: ProjectId,
+   documentId: CadDocumentId,
+diff --git a/packages/contracts/src/clientRpcPermissions.ts b/packages/contracts/src/clientRpcPermissions.ts
+index 6e106881..d1b6527a 100644
+--- a/packages/contracts/src/clientRpcPermissions.ts
++++ b/packages/contracts/src/clientRpcPermissions.ts
+@@ -81,6 +81,7 @@ export const CLIENT_GUARDED_RPC_SCOPES = {
+   [WS_METHODS.cadApply]: AuthOrchestrationOperateScope,
+   [WS_METHODS.cadRestoreRevision]: AuthOrchestrationOperateScope,
+   [WS_METHODS.cadExportStl]: AuthOrchestrationOperateScope,
++  [WS_METHODS.cadExportObj]: AuthOrchestrationOperateScope,
+ } as const;
+ export type ClientGuardedRpcTag = keyof typeof CLIENT_GUARDED_RPC_SCOPES;
+ 
+diff --git a/packages/contracts/src/rpc.ts b/packages/contracts/src/rpc.ts
+index 55341265..b97e3051 100644
+--- a/packages/contracts/src/rpc.ts
++++ b/packages/contracts/src/rpc.ts
+@@ -6,6 +6,8 @@ import {
+   CadDocumentEvent,
+   CadDocumentSnapshot,
+   CadDomainError,
++  CadExportObjInput,
++  CadExportObjResult,
+   CadExportStlInput,
+   CadExportStlResult,
+   CadInspectInput,
+@@ -650,6 +652,7 @@ export const WS_METHODS = {
+   cadApply: "cad.apply",
+   cadRestoreRevision: "cad.restoreRevision",
+   cadExportStl: "cad.exportStl",
++  cadExportObj: "cad.exportObj",
+   cadSubscribeDocument: "cad.subscribeDocument",
+   cadSubscribeProject: "cad.subscribeProject",
+ } as const;
+@@ -2129,6 +2132,12 @@ const WsCadExportStlRpc = Rpc.make(WS_METHODS.cadExportStl, {
+   error: Schema.Union([CadDomainError, EnvironmentAuthorizationError]),
+ });
+ 
++const WsCadExportObjRpc = Rpc.make(WS_METHODS.cadExportObj, {
++  payload: CadExportObjInput,
++  success: CadExportObjResult,
++  error: Schema.Union([CadDomainError, EnvironmentAuthorizationError]),
++});
++
+ const WsCadSubscribeDocumentRpc = Rpc.make(WS_METHODS.cadSubscribeDocument, {
+   payload: CadSubscribeDocumentInput,
+   success: CadDocumentEvent,
+@@ -2374,6 +2383,7 @@ export const WsRpcGroup = RpcGroup.make(
+   WsCadApplyRpc,
+   WsCadRestoreRevisionRpc,
+   WsCadExportStlRpc,
++  WsCadExportObjRpc,
+   WsCadSubscribeDocumentRpc,
+   WsCadSubscribeProjectRpc,
+ ).middleware(RpcScopeAuthorization);
+-- 
+2.55.0
+
