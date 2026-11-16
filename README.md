@@ -2,7 +2,7 @@
 
 # T3CAD
 
-An agent-first parametric 3D CAD workspace built on an isolated `v0.1.9` T3 Code base in [`.work/app`](.work/app).
+An agent-first parametric 3D CAD workspace built on an isolated `v0.1.10` T3 Code base in [`.work/app`](.work/app).
 
 ## Capabilities
 
@@ -17,7 +17,7 @@ An agent-first parametric 3D CAD workspace built on an isolated `v0.1.9` T3 Code
 T3CAD's runnable application lives in [`.work/app`](.work/app) (a local gitignored checkout forked from the pinned `v0.1.9` T3 Code source, separate from `.work/upstream/t3code`). It requires Vite+ (`vp`) and Node 26 (configured in `.work/app/package.json`):
 
 ```bash
-# Instantiate .work/app from pinned v0.1.9 upstream and apply T3CAD patches
+# Instantiate .work/app from pinned v0.1.10 upstream and apply T3CAD patches
 python3 tools/upstream.py --setup-app
 
 cd .work/app

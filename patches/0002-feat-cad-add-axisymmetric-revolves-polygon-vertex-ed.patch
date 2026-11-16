@@ -1,7 +1,7 @@
-From 66db3c9a100418c990bf193f21ff73b3400bf880 Mon Sep 17 00:00:00 2001
+From ac07b137cccd65b2f1e752937aefb30168429a69 Mon Sep 17 00:00:00 2001
 From: T3CAD <t3cad@local>
 Date: Sun, 15 Nov 2026 18:57:43 -0700
-Subject: [PATCH 2/2] feat(cad): add axisymmetric revolves, polygon vertex
+Subject: [PATCH 2/3] feat(cad): add axisymmetric revolves, polygon vertex
  editing, 2D blueprint, and OBJ export
 
 ---
@@ -1499,10 +1499,10 @@ index 5124bd62..3cfcddee 100644
 +  CadExportObjTool,
  );
 diff --git a/apps/server/src/observability/RpcInstrumentation.ts b/apps/server/src/observability/RpcInstrumentation.ts
-index 257970f3..1b8c54ae 100644
+index a6172f30..61c9c814 100644
 --- a/apps/server/src/observability/RpcInstrumentation.ts
 +++ b/apps/server/src/observability/RpcInstrumentation.ts
-@@ -236,6 +236,7 @@ const RPC_AGGREGATES = {
+@@ -240,6 +240,7 @@ const RPC_AGGREGATES = {
    [WS_METHODS.cadApply]: "cad",
    [WS_METHODS.cadRestoreRevision]: "cad",
    [WS_METHODS.cadExportStl]: "cad",
@@ -1511,21 +1511,21 @@ index 257970f3..1b8c54ae 100644
    [WS_METHODS.cadSubscribeProject]: "cad",
  } as const satisfies Readonly<Record<WsRpcMethod, string>>;
 diff --git a/apps/server/src/provider/agentContextBudget.json b/apps/server/src/provider/agentContextBudget.json
-index 7004400e..c6b3e276 100644
+index 00518133..6853762a 100644
 --- a/apps/server/src/provider/agentContextBudget.json
 +++ b/apps/server/src/provider/agentContextBudget.json
 @@ -1,5 +1,5 @@
  {
-   "claudeSystemAppendBytes": 5632,
-   "codexAdditionalContextBytes": 7360,
--  "mcpToolListJsonBytes": 35565
+   "claudeSystemAppendBytes": 5930,
+   "codexAdditionalContextBytes": 7324,
+-  "mcpToolListJsonBytes": 49736
 +  "mcpToolListJsonBytes": 36109
  }
 diff --git a/apps/server/src/ws.ts b/apps/server/src/ws.ts
-index 07ac6d10..409cba49 100644
+index 3ed9c6fa..8f0fdf9a 100644
 --- a/apps/server/src/ws.ts
 +++ b/apps/server/src/ws.ts
-@@ -3519,6 +3519,7 @@ export const layerWsRpc = (
+@@ -3554,6 +3554,7 @@ export const layerWsRpc = (
          [WS_METHODS.cadApply]: (input) => cadDocuments.applyCommands(input),
          [WS_METHODS.cadRestoreRevision]: (input) => cadDocuments.restoreRevision(input),
          [WS_METHODS.cadExportStl]: (input) => cadDocuments.exportStl(input),
@@ -2739,10 +2739,10 @@ index 6570b3b0..020e89e4 100644
    projectId: ProjectId,
    documentId: CadDocumentId,
 diff --git a/packages/contracts/src/clientRpcPermissions.ts b/packages/contracts/src/clientRpcPermissions.ts
-index 6e106881..d1b6527a 100644
+index 3dd881f7..8c438c02 100644
 --- a/packages/contracts/src/clientRpcPermissions.ts
 +++ b/packages/contracts/src/clientRpcPermissions.ts
-@@ -81,6 +81,7 @@ export const CLIENT_GUARDED_RPC_SCOPES = {
+@@ -82,6 +82,7 @@ export const CLIENT_GUARDED_RPC_SCOPES = {
    [WS_METHODS.cadApply]: AuthOrchestrationOperateScope,
    [WS_METHODS.cadRestoreRevision]: AuthOrchestrationOperateScope,
    [WS_METHODS.cadExportStl]: AuthOrchestrationOperateScope,
@@ -2751,7 +2751,7 @@ index 6e106881..d1b6527a 100644
  export type ClientGuardedRpcTag = keyof typeof CLIENT_GUARDED_RPC_SCOPES;
  
 diff --git a/packages/contracts/src/rpc.ts b/packages/contracts/src/rpc.ts
-index 55341265..b97e3051 100644
+index cc06e225..36c7dd38 100644
 --- a/packages/contracts/src/rpc.ts
 +++ b/packages/contracts/src/rpc.ts
 @@ -6,6 +6,8 @@ import {
@@ -2763,7 +2763,7 @@ index 55341265..b97e3051 100644
    CadExportStlInput,
    CadExportStlResult,
    CadInspectInput,
-@@ -650,6 +652,7 @@ export const WS_METHODS = {
+@@ -655,6 +657,7 @@ export const WS_METHODS = {
    cadApply: "cad.apply",
    cadRestoreRevision: "cad.restoreRevision",
    cadExportStl: "cad.exportStl",
@@ -2771,7 +2771,7 @@ index 55341265..b97e3051 100644
    cadSubscribeDocument: "cad.subscribeDocument",
    cadSubscribeProject: "cad.subscribeProject",
  } as const;
-@@ -2129,6 +2132,12 @@ const WsCadExportStlRpc = Rpc.make(WS_METHODS.cadExportStl, {
+@@ -2175,6 +2178,12 @@ const WsCadExportStlRpc = Rpc.make(WS_METHODS.cadExportStl, {
    error: Schema.Union([CadDomainError, EnvironmentAuthorizationError]),
  });
  
@@ -2784,7 +2784,7 @@ index 55341265..b97e3051 100644
  const WsCadSubscribeDocumentRpc = Rpc.make(WS_METHODS.cadSubscribeDocument, {
    payload: CadSubscribeDocumentInput,
    success: CadDocumentEvent,
-@@ -2374,6 +2383,7 @@ export const WsRpcGroup = RpcGroup.make(
+@@ -2423,6 +2432,7 @@ export const WsRpcGroup = RpcGroup.make(
    WsCadApplyRpc,
    WsCadRestoreRevisionRpc,
    WsCadExportStlRpc,

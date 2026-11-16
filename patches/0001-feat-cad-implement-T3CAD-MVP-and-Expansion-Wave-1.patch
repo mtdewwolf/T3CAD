@@ -1,7 +1,7 @@
-From f3432cbd4b0f04189c93f23f194a176fa0f52d89 Mon Sep 17 00:00:00 2001
+From 793ec4325f64e8ea8b3db1cd6350ac85257ca1d4 Mon Sep 17 00:00:00 2001
 From: T3CAD <t3cad@local>
 Date: Sun, 15 Nov 2026 18:42:30 -0700
-Subject: [PATCH 1/2] feat(cad): implement T3CAD MVP and Expansion Wave 1
+Subject: [PATCH 1/3] feat(cad): implement T3CAD MVP and Expansion Wave 1
 
 ---
  apps/server/src/auth/RpcAuthorization.ts      |    5 +
@@ -10,22 +10,21 @@ Subject: [PATCH 1/2] feat(cad): implement T3CAD MVP and Expansion Wave 1
  apps/server/src/cad/CadEdgeCases.test.ts      |  371 +++++
  apps/server/src/cad/CadKernel.test.ts         |  247 +++
  apps/server/src/cad/CadKernel.ts              |  989 ++++++++++++
- apps/server/src/mcp/McpHttpServer.ts          |   29 +-
+ apps/server/src/mcp/McpHttpServer.ts          |   33 +-
  .../src/mcp/toolkits/cad/CadToolkit.test.ts   |  211 +++
  apps/server/src/mcp/toolkits/cad/handlers.ts  |  183 +++
  apps/server/src/mcp/toolkits/cad/tools.ts     |  199 +++
  .../src/mcp/toolkits/worktree/handlers.ts     |   58 -
  .../src/observability/RpcInstrumentation.ts   |    9 +
  .../src/provider/AgentContextBudget.test.ts   |    2 +
- .../src/provider/agentContextBudget.json      |    6 +-
  apps/server/src/server.ts                     |    2 +
  apps/server/src/ws.test.ts                    |    4 +
  apps/server/src/ws.ts                         |   13 +
- apps/web/index.html                           |    6 +-
+ apps/web/index.html                           |    7 +-
  apps/web/package.json                         |    2 +
  apps/web/public/manifest.webmanifest          |    4 +-
  apps/web/src/branding.ts                      |    2 +-
- apps/web/src/components/ChatView.tsx          |   16 +
+ apps/web/src/components/ChatView.tsx          |   15 +
  apps/web/src/components/NoProjectsHero.tsx    |    8 +-
  apps/web/src/components/RightPanelTabs.tsx    |  226 +--
  apps/web/src/components/cad/CadViewport3d.tsx |  435 ++++++
@@ -42,8 +41,8 @@ Subject: [PATCH 1/2] feat(cad): implement T3CAD MVP and Expansion Wave 1
  .../contracts/src/clientRpcPermissions.ts     |    4 +
  packages/contracts/src/index.ts               |    1 +
  packages/contracts/src/rpc.ts                 |   93 ++
- .../src/server/orchestrationInstructions.ts   |   12 +-
- 39 files changed, 6482 insertions(+), 326 deletions(-)
+ .../src/server/orchestrationInstructions.ts   |    9 +-
+ 38 files changed, 6478 insertions(+), 325 deletions(-)
  create mode 100644 apps/server/src/cad/CadDocumentService.test.ts
  create mode 100644 apps/server/src/cad/CadDocumentService.ts
  create mode 100644 apps/server/src/cad/CadEdgeCases.test.ts
@@ -59,10 +58,10 @@ Subject: [PATCH 1/2] feat(cad): implement T3CAD MVP and Expansion Wave 1
  create mode 100644 packages/contracts/src/cad.ts
 
 diff --git a/apps/server/src/auth/RpcAuthorization.ts b/apps/server/src/auth/RpcAuthorization.ts
-index 180f053f..335661fc 100644
+index 7925fd86..da7c5d79 100644
 --- a/apps/server/src/auth/RpcAuthorization.ts
 +++ b/apps/server/src/auth/RpcAuthorization.ts
-@@ -215,6 +215,11 @@ export const RPC_REQUIRED_SCOPES = {
+@@ -217,6 +217,11 @@ export const RPC_REQUIRED_SCOPES = {
    [WS_METHODS.subscribeServerConfig]: AuthOrchestrationReadScope,
    [WS_METHODS.subscribeServerLifecycle]: AuthOrchestrationReadScope,
    [WS_METHODS.subscribeAuthAccess]: AuthAccessReadScope,
@@ -3502,19 +3501,19 @@ index 00000000..5a2c5290
 +  return { stlAscii: `${lines.join("\n")}\n`, triangleCount };
 +};
 diff --git a/apps/server/src/mcp/McpHttpServer.ts b/apps/server/src/mcp/McpHttpServer.ts
-index a160f1fc..295f1cef 100644
+index 752702e3..96e74d39 100644
 --- a/apps/server/src/mcp/McpHttpServer.ts
 +++ b/apps/server/src/mcp/McpHttpServer.ts
-@@ -44,8 +44,6 @@ import { advertisedJsonSchema } from "./advertisedJsonSchema.ts";
- import * as McpInvocationContext from "./McpInvocationContext.ts";
- import * as McpToolAccess from "./McpToolAccess.ts";
+@@ -49,8 +49,6 @@ import * as McpToolAccess from "./McpToolAccess.ts";
+ import * as McpToolExposure from "./McpToolExposure.ts";
+ import { MCP_TOOL_EXPOSURE_HEADER } from "@t3tools/provider-core/server/mcpSession";
  import * as OrchestratorMcpService from "./OrchestratorMcpService.ts";
 -import { PreviewControlsToolkit } from "./toolkits/previewControls/tools.ts";
 -import * as PreviewControlsHandlers from "./toolkits/previewControls/handlers.ts";
  import { EnvironmentToolkit } from "./toolkits/environment/tools.ts";
  import * as EnvironmentHandlers from "./toolkits/environment/handlers.ts";
- import { ProjectToolkit } from "./toolkits/project/tools.ts";
-@@ -65,9 +63,6 @@ import {
+ import { ThemeToolkit } from "./toolkits/theme/tools.ts";
+@@ -72,9 +70,6 @@ import {
    PreviewSnapshotToolkit,
    PreviewStandardToolkit,
  } from "./toolkits/preview/tools.ts";
@@ -3522,21 +3521,24 @@ index a160f1fc..295f1cef 100644
 -import { WorktreeToolkit } from "./toolkits/worktree/tools.ts";
 -import * as WorktreeMcpService from "./WorktreeMcpService.ts";
  import * as PullRequestsHandlers from "./toolkits/pullRequests/handlers.ts";
- import { PullRequestsToolkit } from "./toolkits/pullRequests/tools.ts";
- import * as DeviceHandlers from "./toolkits/device/handlers.ts";
-@@ -78,6 +73,8 @@ import {
- } from "./toolkits/device/tools.ts";
+ import * as ToolSearchHandlers from "./toolkits/toolSearch/handlers.ts";
+ import { ToolSearchToolkit } from "./toolkits/toolSearch/tools.ts";
+@@ -88,8 +83,9 @@ import {
  import * as HtmlHandlers from "./toolkits/html/handlers.ts";
- import { HtmlPreviewTool, HtmlPreviewToolkit, HtmlRenderToolkit } from "./toolkits/html/tools.ts";
+ import { MessageToolkit } from "./toolkits/message/tools.ts";
+ import * as MessageHandlers from "./toolkits/message/handlers.ts";
+-import { HtmlPreviewTool, HtmlPreviewToolkit, HtmlRenderToolkit } from "./toolkits/html/tools.ts";
+ import { MCP_HTTP_PATH } from "../httpCors.ts";
 +import * as CadHandlers from "./toolkits/cad/handlers.ts";
 +import { CadToolkit } from "./toolkits/cad/tools.ts";
  import { requestUrl } from "../requestUrl.ts";
  
  const mcpResourceMetadataUrl = (request: HttpServerRequest.HttpServerRequest) =>
-@@ -1176,16 +1173,6 @@ export const layerOrchestratorToolkit = toolkitRegistration(
- 
+@@ -1261,17 +1257,6 @@ export const layerOrchestratorToolkit = toolkitRegistration(
  export const layerThreadToolkit = toolkitRegistration(ThreadToolkit, ThreadHandlers.layer);
  
+ const layerMessageToolkit = toolkitRegistration(MessageToolkit, MessageHandlers.layer);
+-
 -const layerWorktreeToolkitRegistration = toolkitRegistration(
 -  WorktreeToolkit,
 -  WorktreeHandlers.layer,
@@ -3550,7 +3552,7 @@ index a160f1fc..295f1cef 100644
  const layerEnvironmentToolkit = toolkitRegistration(
    EnvironmentToolkit,
    EnvironmentHandlers.layer,
-@@ -1237,9 +1224,11 @@ export const layerInProcessMcpServer = McpServer.middleware<{
+@@ -1327,9 +1312,11 @@ export const layerInProcessMcpServer = McpServer.middleware<{
    { global: true },
  ).pipe(Layer.provideMerge(McpServer.McpServer.layer));
  
@@ -3561,9 +3563,9 @@ index a160f1fc..295f1cef 100644
 -    name: "T3 Code",
 +    name: "T3CAD",
      version: packageJson.version,
-     path: "/mcp",
-     protocols: [McpProtocol.v2025_06_18],
-@@ -1247,18 +1236,14 @@ export const layerMcpTransport = <RA, RE, RR>(registrations: Layer.Layer<RA, RE,
+     path: MCP_HTTP_PATH,
+     // The first protocol is the fallback for clients that offer an unknown version.
+@@ -1338,19 +1325,15 @@ export const layerMcpTransport = <RA, RE, RR>(registrations: Layer.Layer<RA, RE,
      registrations,
    }).pipe(Layer.provide(layerMcpAuthMiddleware));
  
@@ -3577,13 +3579,15 @@ index a160f1fc..295f1cef 100644
    layerAttachmentToolkit,
    layerProjectRegistration,
    layerEnvironmentToolkit,
+-  layerThemeToolkit,
 -  layerPreviewControlsRegistration,
 -  layerWorktreeToolkitRegistration,
 -  layerPullRequestsToolkit,
 -  layerDeviceToolkit,
++
    layerHtmlToolkit,
+   layerMessageToolkit,
  );
- 
 diff --git a/apps/server/src/mcp/toolkits/cad/CadToolkit.test.ts b/apps/server/src/mcp/toolkits/cad/CadToolkit.test.ts
 new file mode 100644
 index 00000000..519c834d
@@ -4260,10 +4264,10 @@ index 2e78dd2a..00000000
 -
 -export const layer = McpToolAccess.toLayer(WorktreeToolkit, handlers);
 diff --git a/apps/server/src/observability/RpcInstrumentation.ts b/apps/server/src/observability/RpcInstrumentation.ts
-index f9a861cc..257970f3 100644
+index 4549ee8a..a6172f30 100644
 --- a/apps/server/src/observability/RpcInstrumentation.ts
 +++ b/apps/server/src/observability/RpcInstrumentation.ts
-@@ -229,6 +229,15 @@ const RPC_AGGREGATES = {
+@@ -233,6 +233,15 @@ const RPC_AGGREGATES = {
    [WS_METHODS.subscribeServerConfig]: "server",
    [WS_METHODS.subscribeServerLifecycle]: "server",
    [WS_METHODS.subscribeAuthAccess]: "auth",
@@ -4280,7 +4284,7 @@ index f9a861cc..257970f3 100644
  
  const RPC_SPAN_PREFIX = "ws.rpc";
 diff --git a/apps/server/src/provider/AgentContextBudget.test.ts b/apps/server/src/provider/AgentContextBudget.test.ts
-index 8cdd52d2..149a16f3 100644
+index 2a7d02fc..a87465a1 100644
 --- a/apps/server/src/provider/AgentContextBudget.test.ts
 +++ b/apps/server/src/provider/AgentContextBudget.test.ts
 @@ -8,6 +8,7 @@ import * as Layer from "effect/Layer";
@@ -4291,32 +4295,19 @@ index 8cdd52d2..149a16f3 100644
  import { ServerSecretStore } from "../auth/ServerSecretStore.ts";
  import { ServerConfig } from "../config.ts";
  import { DeviceService } from "../device/DeviceService.ts";
-@@ -49,6 +50,7 @@ import budget from "./agentContextBudget.json" with { type: "json" };
+@@ -51,6 +52,7 @@ import budget from "./agentContextBudget.json" with { type: "json" };
  // Registration only stores tool definitions, so the handlers' services are never called.
  const toolHandlerServices = Layer.mergeAll(
    Layer.mock(AssetSigner)({}),
 +  Layer.mock(CadDocumentService)({ capabilities: () => CAD_CAPABILITIES }),
    Layer.mock(DeviceService)({}),
    Layer.mock(DocumentText)({}),
-   Layer.mock(GitVcsDriver)({}),
-diff --git a/apps/server/src/provider/agentContextBudget.json b/apps/server/src/provider/agentContextBudget.json
-index 4439c509..7004400e 100644
---- a/apps/server/src/provider/agentContextBudget.json
-+++ b/apps/server/src/provider/agentContextBudget.json
-@@ -1,5 +1,5 @@
- {
--  "claudeSystemAppendBytes": 5597,
--  "codexAdditionalContextBytes": 7327,
--  "mcpToolListJsonBytes": 48217
-+  "claudeSystemAppendBytes": 5632,
-+  "codexAdditionalContextBytes": 7360,
-+  "mcpToolListJsonBytes": 35565
- }
+   Layer.mock(EnvironmentThemeService)({}),
 diff --git a/apps/server/src/server.ts b/apps/server/src/server.ts
-index 47190f60..27b9985a 100644
+index 47c4a4c9..99e61109 100644
 --- a/apps/server/src/server.ts
 +++ b/apps/server/src/server.ts
-@@ -220,6 +220,7 @@ import {
+@@ -232,6 +232,7 @@ import {
    readTailscaleStatus,
  } from "@t3tools/tailscale";
  import * as ServerActivation from "./serverActivation.ts";
@@ -4324,7 +4315,7 @@ index 47190f60..27b9985a 100644
  
  // Escaped MCP handoff provenance can exceed find-my-way's 100-character segment default.
  const HTTP_ROUTER_CONFIG = {
-@@ -842,6 +843,7 @@ const layerMakeRoutes = Layer.mergeAll(
+@@ -887,6 +888,7 @@ const layerMakeRoutes = Layer.mergeAll(
    ),
    Layer.provide(CloudSpeech.layer.pipe(Layer.provide(SecretResolver.layer))),
    Layer.provide(layerServerSettings),
@@ -4333,10 +4324,10 @@ index 47190f60..27b9985a 100644
    Layer.provide(ServerSelfUpdate.layer.pipe(Layer.provide(layerDesktopAppUpdate))),
    Layer.provide(layerCommandReadiness),
 diff --git a/apps/server/src/ws.test.ts b/apps/server/src/ws.test.ts
-index 63742044..47bf559c 100644
+index f8ad4d32..9cf55d95 100644
 --- a/apps/server/src/ws.test.ts
 +++ b/apps/server/src/ws.test.ts
-@@ -88,6 +88,7 @@ import * as ProviderLatestVersions from "@t3tools/provider-core/server/ProviderL
+@@ -113,6 +113,7 @@ import * as ProviderLatestVersions from "@t3tools/provider-core/server/ProviderL
  import * as ProviderMaintenanceRunner from "./provider/providerMaintenanceRunner.ts";
  import * as ProviderRegistry from "./provider/ProviderRegistry.ts";
  import * as ProviderSessionManager from "./orchestration-v2/ProviderSessionManager.ts";
@@ -4344,7 +4335,7 @@ index 63742044..47bf559c 100644
  import * as PullRequestReviewGuideService from "./pullRequest/PullRequestReviewGuideService.ts";
  import * as PullRequestService from "./pullRequest/PullRequestService.ts";
  import * as PullRequestSyncReactor from "./orchestration-v2/PullRequestSyncReactor.ts";
-@@ -820,6 +821,9 @@ const layerUnusedConfigRpcServices = Layer.mergeAll(
+@@ -859,6 +860,9 @@ const layerUnusedConfigRpcServices = Layer.mergeAll(
    Layer.mock(PullRequestReviewGuideService.PullRequestReviewGuideService)({}),
    Layer.mock(PullRequestService.PullRequestService)({}),
    Layer.mock(PullRequestSyncReactor.PullRequestSyncReactor)({}),
@@ -4355,10 +4346,10 @@ index 63742044..47bf559c 100644
    Layer.mock(RepositoryIdentityResolver.RepositoryIdentityResolver)({}),
    Layer.mock(ResourceTelemetry.ResourceTelemetry)({}),
 diff --git a/apps/server/src/ws.ts b/apps/server/src/ws.ts
-index 5564b801..07ac6d10 100644
+index 8e8b30ba..3ed9c6fa 100644
 --- a/apps/server/src/ws.ts
 +++ b/apps/server/src/ws.ts
-@@ -246,6 +246,7 @@ import * as TraceDiagnostics from "./diagnostics/TraceDiagnostics.ts";
+@@ -250,6 +250,7 @@ import * as TraceDiagnostics from "./diagnostics/TraceDiagnostics.ts";
  import * as TriageService from "./triage/TriageService.ts";
  import * as PullRequestService from "./pullRequest/PullRequestService.ts";
  import * as PullRequestReviewGuideService from "./pullRequest/PullRequestReviewGuideService.ts";
@@ -4366,7 +4357,7 @@ index 5564b801..07ac6d10 100644
  import { listLinkedPullRequestThreads } from "./pullRequest/linkedThreads.ts";
  import { pullRequestSyncKey } from "./pullRequest/pullRequestSyncKey.ts";
  import * as SqlClient from "effect/sql/SqlClient";
-@@ -1452,6 +1453,7 @@ export const layerWsRpc = (
+@@ -1476,6 +1477,7 @@ export const layerWsRpc = (
        const pullRequests = yield* PullRequestService.PullRequestService;
        const reviewGuides = yield* PullRequestReviewGuideService.PullRequestReviewGuideService;
        const pullRequestSync = yield* PullRequestSyncReactor.PullRequestSyncReactor;
@@ -4374,7 +4365,7 @@ index 5564b801..07ac6d10 100644
        const deviceService = yield* DeviceService.DeviceService;
        const deviceHostContext =
          yield* Effect.context<Effect.Services<ReturnType<typeof remoteSshDeviceHosts>>>();
-@@ -3510,6 +3512,15 @@ export const layerWsRpc = (
+@@ -3545,6 +3547,15 @@ export const layerWsRpc = (
                Stream.concat(Stream.make(latest), changes),
              ),
            ),
@@ -4390,7 +4381,7 @@ index 5564b801..07ac6d10 100644
        });
        const splitHandlers: Pick<typeof handlers, SplitWsRpc["_tag"]> = handlers;
        const otherHandlers: Pick<typeof handlers, Exclude<ServerWsRpc, SplitWsRpc>["_tag"]> =
-@@ -3536,6 +3547,7 @@ export const layer = Layer.unwrap(
+@@ -3571,6 +3582,7 @@ export const layer = Layer.unwrap(
      const reviewGuides = yield* PullRequestReviewGuideService.PullRequestReviewGuideService;
      const peerLinks = yield* PeerLinks.PeerLinks;
      const peerLinkRequests = yield* PeerLinkRequests.PeerLinkRequests;
@@ -4398,7 +4389,7 @@ index 5564b801..07ac6d10 100644
      const sql = yield* SqlClient.SqlClient;
      return HttpRouter.add(
        "GET",
-@@ -3625,6 +3637,7 @@ export const layer = Layer.unwrap(
+@@ -3666,6 +3678,7 @@ export const layer = Layer.unwrap(
                ),
                Layer.provide(Layer.succeed(PeerLinks.PeerLinks, peerLinks)),
                Layer.provide(Layer.succeed(PeerLinkRequests.PeerLinkRequests, peerLinkRequests)),
@@ -4407,14 +4398,15 @@ index 5564b801..07ac6d10 100644
                  SourceControlDiscovery.layer.pipe(
                    Layer.provide(
 diff --git a/apps/web/index.html b/apps/web/index.html
-index a7a5e745..2efbbf1e 100644
+index 051e3090..3b9a1cf1 100644
 --- a/apps/web/index.html
 +++ b/apps/web/index.html
-@@ -668,13 +668,13 @@
-         white-space: nowrap;
-       }
-     </style>
--    <title>T3 Code (Beta)</title>
+@@ -680,14 +680,13 @@
+       const desktopDisplayName = window.desktopBridge?.getAppBranding?.()?.displayName;
+       if (desktopDisplayName) document.title = desktopDisplayName;
+     </script>
+-    <!-- vite.config.ts stamps the web build's channel into this title. -->
+-    <title>T3 Code</title>
 +    <title>T3CAD</title>
    </head>
    <body>
@@ -4428,10 +4420,10 @@ index a7a5e745..2efbbf1e 100644
        </div>
      </div>
 diff --git a/apps/web/package.json b/apps/web/package.json
-index e42f4e3b..dacf118f 100644
+index fd3aca76..e7a4309c 100644
 --- a/apps/web/package.json
 +++ b/apps/web/package.json
-@@ -102,6 +102,7 @@
+@@ -106,6 +106,7 @@
      "@types/react": "catalog:",
      "@types/react-dom": "catalog:",
      "@types/sql.js": "1.4.11",
@@ -4439,7 +4431,7 @@ index e42f4e3b..dacf118f 100644
      "@types/use-sync-external-store": "^0.0.6",
      "@vercel/config": "^0.3.0",
      "@vitejs/plugin-react": "^6.1.2",
-@@ -111,6 +112,7 @@
+@@ -116,6 +117,7 @@
      "oxc-transform-react": "~0.152.0",
      "playwright": "1.64.1",
      "tailwindcss": "^4.0.0",
@@ -4462,23 +4454,23 @@ index 26d1c2e0..da2504fe 100644
    "scope": "/",
    "display": "standalone",
 diff --git a/apps/web/src/branding.ts b/apps/web/src/branding.ts
-index 6ac2d1f3..da4e6164 100644
+index bf5b76f0..7cce24d7 100644
 --- a/apps/web/src/branding.ts
 +++ b/apps/web/src/branding.ts
-@@ -16,7 +16,7 @@ export const HOSTED_APP_CHANNEL =
+@@ -19,7 +19,7 @@ const hostedAppChannel = import.meta.env.VITE_HOSTED_APP_CHANNEL?.trim().toLower
+ export const HOSTED_APP_CHANNEL =
    hostedAppChannel === "latest" || hostedAppChannel === "nightly" ? hostedAppChannel : null;
- export const HOSTED_APP_CHANNEL_LABEL =
-   HOSTED_APP_CHANNEL === "nightly" ? "Nightly" : HOSTED_APP_CHANNEL === "latest" ? "Latest" : null;
+ export const HOSTED_APP_CHANNEL_LABEL = resolveHostedAppChannelLabel(HOSTED_APP_CHANNEL);
 -export const APP_BASE_NAME = injectedDesktopAppBranding?.baseName ?? "T3 Code";
 +export const APP_BASE_NAME = injectedDesktopAppBranding?.baseName ?? "T3CAD";
  export const APP_STAGE_LABEL =
    injectedDesktopAppBranding?.stageLabel ??
-   HOSTED_APP_CHANNEL_LABEL ??
+   resolveWebAppStageLabel({
 diff --git a/apps/web/src/components/ChatView.tsx b/apps/web/src/components/ChatView.tsx
-index f4561188..b158dd07 100644
+index fbec5620..0340a927 100644
 --- a/apps/web/src/components/ChatView.tsx
 +++ b/apps/web/src/components/ChatView.tsx
-@@ -1172,6 +1172,19 @@ export default function ChatView(props: ChatViewProps) {
+@@ -1201,6 +1201,18 @@ export default function ChatView(props: ChatViewProps) {
      useRightPanelStore.getState().reconcileFileSurfaces(activeThreadRef, activeProject !== null);
    }, [activeEnvironmentBootstrapComplete, activeProject, activeThreadRef]);
  
@@ -4494,11 +4486,10 @@ index f4561188..b158dd07 100644
 +    }
 +    useRightPanelStore.getState().ensureDefaultCadSurface(activeThreadRef);
 +  }, [activeEnvironmentBootstrapComplete, activeProject, activeThreadRef, embedded]);
-+
-   const primaryEnvironmentId = primaryEnvironment?.environmentId ?? null;
    const activeEnvironment =
      activeThread == null ? null : (environmentById.get(activeThread.environmentId) ?? null);
-@@ -2333,6 +2346,7 @@ export default function ChatView(props: ChatViewProps) {
+   const activeEnvironmentUnavailable =
+@@ -2389,6 +2401,7 @@ export default function ChatView(props: ChatViewProps) {
      : null;
    const {
      activateRightPanelSurfaceStable,
@@ -4506,7 +4497,7 @@ index f4561188..b158dd07 100644
      addDeviceSurfaceStable,
      addDiffSurfaceStable,
      addFilesSurfaceStable,
-@@ -3973,6 +3987,7 @@ export default function ChatView(props: ChatViewProps) {
+@@ -4037,6 +4050,7 @@ export default function ChatView(props: ChatViewProps) {
            onAddPullRequest={addPullRequestSurfaceStable}
            onAddPullRequests={addPullRequestsSurfaceStable}
            onAddDevice={addDeviceSurfaceStable}
@@ -4514,7 +4505,7 @@ index f4561188..b158dd07 100644
            onAddSideChat={sideChatsOffered ? openSideChatStable : undefined}
            browserAvailable={canOperatePreview && browserAvailable}
            terminalAvailable={activeProject !== null && canOperateTerminal}
-@@ -3981,6 +3996,7 @@ export default function ChatView(props: ChatViewProps) {
+@@ -4045,6 +4059,7 @@ export default function ChatView(props: ChatViewProps) {
            pullRequestAvailable={pullRequestSurfaceAvailable}
            pullRequestsAvailable={pullRequestsSurfaceAvailable}
            deviceAvailable={activeThreadRef !== null}
@@ -4548,7 +4539,7 @@ index e6ebe653..be8250d0 100644
                  {scratchTargetEnvironmentId === null ? null : (
                    <Button
 diff --git a/apps/web/src/components/RightPanelTabs.tsx b/apps/web/src/components/RightPanelTabs.tsx
-index f3066201..ead12959 100644
+index 79766162..fab56ae8 100644
 --- a/apps/web/src/components/RightPanelTabs.tsx
 +++ b/apps/web/src/components/RightPanelTabs.tsx
 @@ -36,8 +36,7 @@ import { restrictToFirstScrollableAncestor, restrictToHorizontalAxis } from "@dn
@@ -4588,7 +4579,7 @@ index f3066201..ead12959 100644
  import { ScrollArea } from "~/components/ui/scroll-area";
  import { PanelTabCloseButton } from "~/components/ui/panel-tab-close-button";
  import { faviconUrlForOrigin } from "@t3tools/shared/favicon";
-@@ -141,6 +131,7 @@ export interface RightPanelTabsProps {
+@@ -143,6 +133,7 @@ export interface RightPanelTabsProps {
    onAddPullRequest: () => void;
    onAddPullRequests: () => void;
    onAddDevice: () => void;
@@ -4596,7 +4587,7 @@ index f3066201..ead12959 100644
    /** Absent where side chats are not offered. */
    onAddSideChat?: (() => void) | undefined;
    browserAvailable: boolean;
-@@ -150,6 +141,7 @@ export interface RightPanelTabsProps {
+@@ -152,6 +143,7 @@ export interface RightPanelTabsProps {
    pullRequestAvailable: boolean;
    pullRequestsAvailable: boolean;
    deviceAvailable: boolean;
@@ -4604,7 +4595,7 @@ index f3066201..ead12959 100644
    sideChatAvailable?: boolean;
    /** Overrides the default reason while side chats are available but cannot start. */
    sideChatDisabledReason?: string | null;
-@@ -167,18 +159,10 @@ export interface PullRequestTabStatus {
+@@ -169,18 +161,10 @@ export interface PullRequestTabStatus {
  
  export type PullRequestTabStatusSeed = Pick<PullRequestTabStatus, "state" | "isDraft">;
  
@@ -4624,7 +4615,7 @@ index f3066201..ead12959 100644
    sideChat: "Side chats start after the first message.",
  } as const;
  
-@@ -197,13 +181,9 @@ const LAUNCHER_SHORTCUT_BLOCKING_LAYERS = [
+@@ -199,13 +183,9 @@ const LAUNCHER_SHORTCUT_BLOCKING_LAYERS = [
    .join(",");
  
  const SURFACE_UNAVAILABLE_HINTS = {
@@ -4639,7 +4630,7 @@ index f3066201..ead12959 100644
    sideChat: "Available after the first message.",
  } as const;
  
-@@ -313,24 +293,14 @@ function SurfaceMenuItem(props: {
+@@ -315,24 +295,14 @@ function SurfaceMenuItem(props: {
  }
  
  function RightPanelEmptyState(props: {
@@ -4666,7 +4657,7 @@ index f3066201..ead12959 100644
    sideChatAvailable: boolean;
    sideChatDisabledReason: string | null;
  }) {
-@@ -338,12 +308,12 @@ function RightPanelEmptyState(props: {
+@@ -340,12 +310,12 @@ function RightPanelEmptyState(props: {
  
    const actions = [
      {
@@ -4685,7 +4676,7 @@ index f3066201..ead12959 100644
      },
      {
        label: "Terminal",
-@@ -361,39 +331,6 @@ function RightPanelEmptyState(props: {
+@@ -363,39 +333,6 @@ function RightPanelEmptyState(props: {
        disabledReason: SURFACE_UNAVAILABLE_HINTS.files,
        onClick: props.onAddFiles,
      },
@@ -4725,7 +4716,7 @@ index f3066201..ead12959 100644
      ...(props.onAddSideChat
        ? [
            {
-@@ -506,42 +443,9 @@ function RightPanelEmptyState(props: {
+@@ -508,42 +445,9 @@ function RightPanelEmptyState(props: {
                    )}
                  >
                    {actionIcon(action, "size-4")}
@@ -4769,7 +4760,7 @@ index f3066201..ead12959 100644
                </div>
              ) : (
                <DisabledReasonTooltip
-@@ -573,6 +477,8 @@ function surfaceTitle(
+@@ -575,6 +479,8 @@ function surfaceTitle(
    terminalLabelsById: ReadonlyMap<string, string>,
  ): string {
    switch (surface.kind) {
@@ -4778,7 +4769,7 @@ index f3066201..ead12959 100644
      case "diff":
        return "Diff";
      case "files":
-@@ -655,6 +561,8 @@ function SurfaceIcon({
+@@ -657,6 +563,8 @@ function SurfaceIcon({
    pullRequestStatusSeed: PullRequestTabStatusSeed | undefined;
  }) {
    switch (surface.kind) {
@@ -4787,7 +4778,7 @@ index f3066201..ead12959 100644
      case "preview":
        return <PreviewFavicon capturedUrl={previewCapturedUrl} url={previewUrl} />;
      case "diff":
-@@ -1029,7 +937,6 @@ function RightPanelTab(
+@@ -1027,7 +935,6 @@ function RightPanelTab(
  export function RightPanelTabs(props: RightPanelTabsProps) {
    const focusedSurface = props.surfaces.find((surface) => surface.id === props.activeSurfaceId);
    const ownsDesktopTitleBar = isElectron && props.mode === "inline";
@@ -4795,7 +4786,7 @@ index f3066201..ead12959 100644
    const { resolvedTheme } = useTheme();
    const tabListRef = useRef<HTMLDivElement>(null);
    const addSurfaceTriggerRef = useRef<HTMLButtonElement>(null);
-@@ -1096,12 +1003,12 @@ export function RightPanelTabs(props: RightPanelTabsProps) {
+@@ -1094,12 +1001,12 @@ export function RightPanelTabs(props: RightPanelTabsProps) {
  
    const addSurfaceActions = [
      {
@@ -4814,7 +4805,7 @@ index f3066201..ead12959 100644
      },
      {
        label: "Terminal",
-@@ -1119,38 +1026,6 @@ export function RightPanelTabs(props: RightPanelTabsProps) {
+@@ -1117,38 +1024,6 @@ export function RightPanelTabs(props: RightPanelTabsProps) {
        disabledReason: SURFACE_DISABLED_REASONS.files,
        onClick: props.onAddFiles,
      },
@@ -4853,7 +4844,7 @@ index f3066201..ead12959 100644
      ...(props.onAddSideChat
        ? [
            {
-@@ -1418,41 +1293,6 @@ export function RightPanelTabs(props: RightPanelTabsProps) {
+@@ -1426,41 +1301,6 @@ export function RightPanelTabs(props: RightPanelTabsProps) {
                  >
                    {addSurfaceActions.map((action) => {
                      const Icon = action.icon;
@@ -4895,7 +4886,7 @@ index f3066201..ead12959 100644
                      return (
                        <SurfaceMenuItem
                          key={action.label}
-@@ -1529,23 +1369,13 @@ export function RightPanelTabs(props: RightPanelTabsProps) {
+@@ -1537,23 +1377,13 @@ export function RightPanelTabs(props: RightPanelTabsProps) {
        <div className="flex min-h-0 flex-1 flex-col" data-right-panel-surface-content>
          {props.activeSurfaceId === null ? (
            <RightPanelEmptyState
@@ -6631,10 +6622,10 @@ index 5ba6985e..afff3204 100644
        return (
          <Suspense fallback={null}>
 diff --git a/apps/web/src/components/chat/useRightPanelActions.ts b/apps/web/src/components/chat/useRightPanelActions.ts
-index 25ec5c22..99f57eb6 100644
+index 7caf0056..d2560e2e 100644
 --- a/apps/web/src/components/chat/useRightPanelActions.ts
 +++ b/apps/web/src/components/chat/useRightPanelActions.ts
-@@ -142,6 +142,11 @@ export function useRightPanelActions(input: RightPanelActionsInput) {
+@@ -138,6 +138,11 @@ export function useRightPanelActions(input: RightPanelActionsInput) {
      addDiffSurface();
    };
    const openChangesFromThreadPanelStable = useStableCallback(openChangesFromThreadPanel);
@@ -6646,7 +6637,7 @@ index 25ec5c22..99f57eb6 100644
    const addFilesSurface = () => {
      if (!activeThreadRef || !activeProject) return;
      useRightPanelStore.getState().open(activeThreadRef, "files");
-@@ -343,6 +348,7 @@ export function useRightPanelActions(input: RightPanelActionsInput) {
+@@ -325,6 +330,7 @@ export function useRightPanelActions(input: RightPanelActionsInput) {
    return {
      shortcuts,
      activateRightPanelSurfaceStable,
@@ -6974,10 +6965,10 @@ index 00000000..51fd705b
 +  }),
 +};
 diff --git a/packages/client-runtime/src/rpc/client.ts b/packages/client-runtime/src/rpc/client.ts
-index 0d8c9e13..5cf0f228 100644
+index ee70400c..4f5524f2 100644
 --- a/packages/client-runtime/src/rpc/client.ts
 +++ b/packages/client-runtime/src/rpc/client.ts
-@@ -73,7 +73,9 @@ export type EnvironmentSubscriptionRpcTag =
+@@ -74,7 +74,9 @@ export type EnvironmentSubscriptionRpcTag =
    | typeof WS_METHODS.subscribeWorktreeSetup
    | typeof WS_METHODS.subscribeProjectClones
    | typeof WS_METHODS.terminalAttach
@@ -7467,10 +7458,10 @@ index 00000000..6570b3b0
 +]);
 +export type CadDomainError = typeof CadDomainError.Type;
 diff --git a/packages/contracts/src/clientRpcPermissions.ts b/packages/contracts/src/clientRpcPermissions.ts
-index 8b4a7d48..6e106881 100644
+index 8681c1ea..3dd881f7 100644
 --- a/packages/contracts/src/clientRpcPermissions.ts
 +++ b/packages/contracts/src/clientRpcPermissions.ts
-@@ -77,6 +77,10 @@ export const CLIENT_GUARDED_RPC_SCOPES = {
+@@ -78,6 +78,10 @@ export const CLIENT_GUARDED_RPC_SCOPES = {
    [WS_METHODS.peerLinksUnlink]: AuthAccessWriteScope,
    // A link lets every agent here reach the other environment: Settings' bar.
    [WS_METHODS.peerLinksAnswerRequest]: AuthAccessWriteScope,
@@ -7491,7 +7482,7 @@ index 8dd47df3..de93ab7a 100644
  export * from "./clientRpcPermissions.ts";
 +export * from "./cad.ts";
 diff --git a/packages/contracts/src/rpc.ts b/packages/contracts/src/rpc.ts
-index 0f6af191..55341265 100644
+index e1d392cd..cc06e225 100644
 --- a/packages/contracts/src/rpc.ts
 +++ b/packages/contracts/src/rpc.ts
 @@ -1,3 +1,21 @@
@@ -7516,7 +7507,7 @@ index 0f6af191..55341265 100644
  import {
    OrchestrationV2SearchThreadError,
    OrchestrationV2SearchThreadInput,
-@@ -624,6 +642,16 @@ export const WS_METHODS = {
+@@ -629,6 +647,16 @@ export const WS_METHODS = {
    subscribeServerLifecycle: "subscribeServerLifecycle",
    subscribeAuthAccess: "subscribeAuthAccess",
    subscribeResourceTelemetry: "subscribeResourceTelemetry",
@@ -7533,7 +7524,7 @@ index 0f6af191..55341265 100644
  } as const;
  
  const WsServerUpsertKeybindingRpc = Rpc.make(WS_METHODS.serverUpsertKeybinding, {
-@@ -2059,6 +2087,62 @@ const WsSubscribeResourceTelemetryRpc = Rpc.make(WS_METHODS.subscribeResourceTel
+@@ -2105,6 +2133,62 @@ const WsSubscribeResourceTelemetryRpc = Rpc.make(WS_METHODS.subscribeResourceTel
    stream: true,
  });
  
@@ -7596,7 +7587,7 @@ index 0f6af191..55341265 100644
  export class RpcScopeAuthorization extends RpcMiddleware.Service<RpcScopeAuthorization>()(
    "t3/contracts/RpcScopeAuthorization",
    { error: EnvironmentAuthorizationError },
-@@ -2283,4 +2367,13 @@ export const WsRpcGroup = RpcGroup.make(
+@@ -2332,4 +2416,13 @@ export const WsRpcGroup = RpcGroup.make(
    WsOrchestrationV2SubscribeThreadRpc,
    WsOrchestrationV2SubscribeCommandOutputRpc,
    WsOrchestrationV2SubscribePromptSuggestionRpc,
@@ -7611,7 +7602,7 @@ index 0f6af191..55341265 100644
 +  WsCadSubscribeProjectRpc,
  ).middleware(RpcScopeAuthorization);
 diff --git a/packages/provider-core/src/server/orchestrationInstructions.ts b/packages/provider-core/src/server/orchestrationInstructions.ts
-index 9c9720ed..ea1704e3 100644
+index 4ce08d71..9ef11bd7 100644
 --- a/packages/provider-core/src/server/orchestrationInstructions.ts
 +++ b/packages/provider-core/src/server/orchestrationInstructions.ts
 @@ -2,9 +2,7 @@ import type { ProviderInteractionMode } from "@t3tools/contracts";
@@ -7623,11 +7614,11 @@ index 9c9720ed..ea1704e3 100644
 -Ordinary coding tasks need no T3 tools.
 +  `## T3CAD orchestration
  
- - Subagents: use your native tool when the child uses your provider, a model it offers, and no settings beyond yours (Claude \`Agent\`, \`run_in_background:false\`; Codex \`spawn_agent\`, then wait). Use \`delegate_task\` for another provider's model, user-asked settings, a separate checkout (\`isolation:"worktree"\`), or \`delegate_task\` by name. A native type on another provider's model counts too. Background agent: \`delegate_task\`, never a background \`Agent\`. Workflow only when asked.
- - Call \`orchestrator_capabilities\` once per thread, before the first \`delegate_task\`. Again only after an error or a user-named provider change. Settings go in \`target.options\`. Provider or model unavailable: say so. Never switch unasked, or fall back to native tools, Workflow, or CLIs. Never make a child's checkout in the shell or in \`task\`.
-@@ -18,10 +16,14 @@ Ordinary coding tasks need no T3 tools.
- - In your reply, mention a thread by its \`link\`, verbatim. Never a plain title or bare id.
- - A login, token, PIN, pairing code or sudo password only the user can give: call \`request_secret\`, not a chat ask or a handoff. Not for access you have. Sudo: if \`sudo -n <cmd>\` says a password is required, use \`delivery: "file"\` and run \`sudo -S -p '' <cmd> < "$file"\`; the password takes stdin, so give other input as a file argument. When asked only to schedule, \`schedule_task\` without running its prompt.
+ - Subagents: use your native tool when the child uses your provider, a model it offers and no settings beyond yours (Claude \`Agent\`, \`run_in_background:false\`; Codex \`spawn_agent\`, then wait). Use \`delegate_task\` for another provider's model, user-asked settings, a separate checkout (\`isolation:"worktree"\`), or \`delegate_task\` by name. A native type on another provider's model counts too. Background agent: \`delegate_task\`, never a background \`Agent\`. Workflow only when asked.
+ - Call \`orchestrator_capabilities\` once per thread, before the first \`delegate_task\`. Again only after an error or a user-named provider change. Settings go in \`target.options\`. Provider or model unavailable: say so. Never switch unasked or fall back to native tools, Workflow or CLIs. Never make a child's checkout in the shell or in \`task\`.
+@@ -18,6 +16,11 @@ Ordinary coding tasks need no T3 tools.
+ - In your reply, mention a thread by its \`link\`, verbatim, never a plain title or bare id.
+ - A login, token, PIN, pairing code or sudo password only the user can give: call \`request_secret\`, not a chat ask or a handoff. Not for access you have. Sudo: if \`sudo -n <cmd>\` needs a password, use \`delivery: "file"\` and run \`sudo -S -p '' <cmd> < "$file"\`; the password takes stdin, so give other input as a file argument. Asked only to schedule: \`schedule_task\` without running its prompt.
  - T3 tools may load late. Try the name once before you call it absent.`,
 +  `### T3CAD agent harness
 +
@@ -7636,12 +7627,7 @@ index 9c9720ed..ea1704e3 100644
 +- Mutate via \`cad_apply\` (\`requestId\`, \`expectedRevision\`, atomic \`commands\`) and verify \`report\` (\`status\`, \`watertight\`, \`boundsMm\`, \`totalVolumeMm3\`, \`warnings\`) before exporting with \`cad_export_stl\`.`,
    `### Visuals and preview
  
--- Answer data with a trend or comparison with a chart, and show any visual the user asks for here: pass the path to an HTML file, or inline HTML to \`html_preview\`, then \`html_render\`. A screenshot on disk or a text description does not show it. Never start a server for it. Page tools write only on user request. Never use them to show results. Asked for an image to post, send, or use elsewhere: a \`.png\` file and its path, never \`html_render\`.
--- Never use \`preview_*\` unasked to verify or show your own edit. Use them when the current request asks for browser work, including recording edits, or names a page or tab. Do not repeat preview calls from an earlier turn. Public pages: web fetch or search unless browser work was asked; then preview tools only, no web fetch. Close a tab you opened before you reply, unless the user asked for it or uses it.`,
-+- Answer data with a trend or comparison with a chart, and show any visual the user asks for here: pass the path to an HTML file, or inline HTML to \`html_preview\`, then \`html_render\`. A screenshot on disk or a text description does not show it. Never start a server for it. Page tools write only on user request. Never use them to show results. Asked for an image to post, send, or use elsewhere: a \`.png\` file and its path, never \`html_render\`.`,
- ];
- 
- export const T3_CODE_ORCHESTRATION_INSTRUCTIONS = `
+ - Answer data with a trend or comparison with a chart and show any visual the user asks for here: pass an HTML file path or inline HTML to \`html_preview\`, then \`html_render\`. A screenshot on disk or a text description doesn't show it. Never start a server for it. Page tools write only on user request. Never use them to show results. Asked for an image to post, send or use elsewhere: a \`.png\` file and its path, never \`html_render\`.
 -- 
 2.55.0
 

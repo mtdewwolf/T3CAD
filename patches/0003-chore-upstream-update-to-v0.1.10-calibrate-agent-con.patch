@@ -1,0 +1,73 @@
+From 7d4bc80555f4420230cd2fd611402a315aa6181d Mon Sep 17 00:00:00 2001
+From: T3CAD <t3cad@local>
+Date: Sun, 15 Nov 2026 19:26:26 -0700
+Subject: [PATCH 3/3] chore(upstream): update to v0.1.10, calibrate agent
+ context budget, and sync lockfile
+
+---
+ apps/server/src/mcp/McpHttpServer.ts             | 3 ++-
+ apps/server/src/provider/agentContextBudget.json | 6 +++---
+ pnpm-lock.yaml                                   | 6 ++++++
+ 3 files changed, 11 insertions(+), 4 deletions(-)
+
+diff --git a/apps/server/src/mcp/McpHttpServer.ts b/apps/server/src/mcp/McpHttpServer.ts
+index 96e74d39..76171efc 100644
+--- a/apps/server/src/mcp/McpHttpServer.ts
++++ b/apps/server/src/mcp/McpHttpServer.ts
+@@ -83,6 +83,7 @@ import {
+ import * as HtmlHandlers from "./toolkits/html/handlers.ts";
+ import { MessageToolkit } from "./toolkits/message/tools.ts";
+ import * as MessageHandlers from "./toolkits/message/handlers.ts";
++import { HtmlPreviewTool, HtmlPreviewToolkit, HtmlRenderToolkit } from "./toolkits/html/tools.ts";
+ import { MCP_HTTP_PATH } from "../httpCors.ts";
+ import * as CadHandlers from "./toolkits/cad/handlers.ts";
+ import { CadToolkit } from "./toolkits/cad/tools.ts";
+@@ -1333,7 +1334,7 @@ export const layerTools = Layer.mergeAll(
+   layerAttachmentToolkit,
+   layerProjectRegistration,
+   layerEnvironmentToolkit,
+-
++  layerThemeToolkit,
+   layerHtmlToolkit,
+   layerMessageToolkit,
+ );
+diff --git a/apps/server/src/provider/agentContextBudget.json b/apps/server/src/provider/agentContextBudget.json
+index 6853762a..70419cda 100644
+--- a/apps/server/src/provider/agentContextBudget.json
++++ b/apps/server/src/provider/agentContextBudget.json
+@@ -1,5 +1,5 @@
+ {
+-  "claudeSystemAppendBytes": 5930,
+-  "codexAdditionalContextBytes": 7324,
+-  "mcpToolListJsonBytes": 36109
++  "claudeSystemAppendBytes": 6374,
++  "codexAdditionalContextBytes": 7766,
++  "mcpToolListJsonBytes": 37732
+ }
+diff --git a/pnpm-lock.yaml b/pnpm-lock.yaml
+index 15b87868..9586935c 100644
+--- a/pnpm-lock.yaml
++++ b/pnpm-lock.yaml
+@@ -1309,6 +1309,9 @@ importers:
+       '@types/sql.js':
+         specifier: 1.4.11
+         version: 1.4.11
++      '@types/three':
++        specifier: 0.180.0
++        version: 0.180.0
+       '@types/use-sync-external-store':
+         specifier: ^0.0.6
+         version: 0.0.6
+@@ -1339,6 +1342,9 @@ importers:
+       tailwindcss:
+         specifier: 4.3.3
+         version: 4.3.3
++      three:
++        specifier: 0.180.0
++        version: 0.180.0
+       vite:
+         specifier: npm:@voidzero-dev/vite-plus-core@1.4.0
+         version: '@voidzero-dev/vite-plus-core@1.4.0(@types/node@24.12.4)(@volar/typescript@2.4.28(typescript@6.0.3))(esbuild@0.28.2)(jiti@2.7.0)(terser@5.48.0)(typescript@6.0.3)(unrun@0.2.39)(yaml@2.9.0)'
+-- 
+2.55.0
+
